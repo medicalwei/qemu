@@ -193,6 +193,7 @@ common-obj-$(CONFIG_XEN_BACKEND) += xen_console.o xenfb.o xen_disk.o xen_nic.o
 # need to fix this properly
 obj-$(CONFIG_VIRTIO) += virtio.o virtio-blk.o virtio-balloon.o virtio-net.o
 obj-$(CONFIG_VIRTIO) += virtio-serial-bus.o virtio-scsi.o
+obj-$(CONFIG_VIRTIO) += virtio-memlink.o
 obj-$(CONFIG_SOFTMMU) += vhost_net.o
 obj-$(CONFIG_VHOST_NET) += vhost.o
 obj-$(CONFIG_REALLY_VIRTFS) += 9pfs/
