@@ -761,6 +761,17 @@ void hmp_balloon(Monitor *mon, const QDict *qdict)
     }
 }
 
+void hmp_memlink(Monitor *mon, const QDict *qdict)
+{
+    Error *errp = NULL;
+
+    qmp_memlink(&errp);
+    if (error_is_set(&errp)) {
+        monitor_printf(mon, "memlink: %s\n", error_get_pretty(errp));
+        error_free(errp);
+    }
+}
+
 void hmp_block_resize(Monitor *mon, const QDict *qdict)
 {
     const char *device = qdict_get_str(qdict, "device");
