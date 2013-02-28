@@ -1051,7 +1051,7 @@ static void virtio_memlink_class_init(ObjectClass *klass, void *data)
     k->init = virtio_memlink_init_pci;
     k->exit = virtio_memlink_exit_pci;
     k->vendor_id = PCI_VENDOR_ID_REDHAT_QUMRANET;
-    k->device_id = 0x10ff; // NOTE: refer to ./pci-ids.txt, this device number is used for experimental usage.
+    k->device_id = 0x103f; // NOTE: refer to ./pci-ids.txt, this device number is used for experimental usage.
     k->revision = VIRTIO_PCI_ABI_VERSION;
     k->class_id = PCI_CLASS_OTHERS;
     dc->reset = virtio_pci_reset;
