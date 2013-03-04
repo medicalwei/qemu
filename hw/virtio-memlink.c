@@ -9,6 +9,7 @@
 
 #if defined(__linux__)
 #include <sys/mman.h>
+#include <sys/uio.h>
 #endif
 
 #define DEBUG 1
@@ -18,8 +19,8 @@
 
 typedef struct Memlink{
 	  int status;
-    void * host_pointer; /* pointer to exchanged host memory. */
-    void ** guest_pointers; /* pointers to HVAs. */
+    void *host_pointer; /* pointer to exchanged host memory. */
+    struct iovec *iov; /* pointers to HVAs. */
     size_t size;
     uint32_t max_size;
 		MemoryRegion *mr;
@@ -36,40 +37,44 @@ typedef struct VirtIOMemlink
     uint32_t state_count;
 } VirtIOMemlink;
 
-static void virtio_memlink_link_address(struct Memlink *memlink)
+static void virtio_memlink_link_address(struct Memlink *ml)
 {
-	  int count;
-		if (memlink->status != MEMLINK_UNUSED) {
+#if 0
+		struct iovec iov;
+		int fd[2];
+
+		if (ml->status != MEMLINK_UNUSED) {
 			error_report("virtio-memlink requesting link on used memory");
 			exit(1);
 		}
-		memlink->status = MEMLINK_USED;
-	  memlink->host_pointer = valloc(4096*memlink->size); /* FIXME: page size constant */
-	  void *dummy = valloc(4096*memlink->size); /* dummy memory */
 
-		for(count=0; count<memlink->size; count++){
-		    mremap(memlink->guest_pointers[count], 4096, 4096,
-						   MREMAP_MAYMOVE | MREMAP_FIXED, memlink->host_pointer+count*4096);
-		    mremap(dummy+count*4096, 4096, 4096,
-						   MREMAP_MAYMOVE | MREMAP_FIXED, memlink->guest_pointers[count]);
+		if (pipe(fd) < 0){
+			error_report("virtio-memlink failed to create pipe");
+			exit(1);
 		}
+
+		ml->status = MEMLINK_USED;
+
+	  ml->host_pointer = valloc(4096*ml->size); /* FIXME: page size constant */
+		iov.iov_base = ml->host_pointer;
+		iov.iov_len = 4096*ml->size;
+
+		vmsplice(fd[1], ml->iov, ml->size, SPLICE_F_GIFT);
+		vmsplice(fd[0], &iov, ml->size, 0);
+#endif
 }
 
-static void virtio_memlink_revoke_address(struct Memlink *memlink)
+static void virtio_memlink_revoke_address(struct Memlink *ml)
 {
-	  int count;
-		if (memlink->status != MEMLINK_USED) {
+#if 0
+		if (ml->status != MEMLINK_USED) {
 			error_report("virtio-memlink revoking link on unused memory");
 			exit(1);
 		}
 
-		for(count=0; count<memlink->size; count++){
-		    mremap(memlink->host_pointer+count*4096, 4096, 4096,
-						   MREMAP_MAYMOVE | MREMAP_FIXED, memlink->guest_pointers[count]);
-		}
-
-		free(memlink->guest_pointers);
-		memlink->status = MEMLINK_UNUSED;
+		free(ml->iov);
+		ml->status = MEMLINK_UNUSED;
+#endif
 }
 
 static void virtio_memlink_handle_create(VirtIODevice *vdev, VirtQueue *vq)
@@ -108,7 +113,7 @@ static void virtio_memlink_handle_create(VirtIODevice *vdev, VirtQueue *vq)
 					exit(1);
 				}
 
-				ml->guest_pointers = valloc(sizeof(ram_addr_t) * ml->max_size);
+				ml->iov = malloc(sizeof(struct iovec) * ml->max_size);
 				ml->size = 0;
 
         #if DEBUG
@@ -136,7 +141,8 @@ static void virtio_memlink_handle_create(VirtIODevice *vdev, VirtQueue *vq)
 
             addr = section.offset_within_region;
 
-						ml->guest_pointers[ml->size] = memory_region_get_ram_ptr(section.mr) + addr;
+						ml->iov[ml->size].iov_base = memory_region_get_ram_ptr(section.mr) + addr;
+						ml->iov[ml->size].iov_len = 4096;
 						ml->size += 1;
 						if(ml->size >= ml->max_size) break;
         }
@@ -145,14 +151,16 @@ static void virtio_memlink_handle_create(VirtIODevice *vdev, VirtQueue *vq)
             printf("\n");
         #endif
 
-				printf("%d ", *((int *) ml->guest_pointers[0]));
-				printf("%d ", *((int *) ml->guest_pointers[1]));
-				printf("%d ", *((int *) ml->guest_pointers[2]));
-				printf("%d\n", *((int *) ml->guest_pointers[3]));
-
         virtio_memlink_link_address(ml);
 
 				// XXX: test
+				printf("%d ", *((int *) ml->host_pointer));
+				printf("%d ", *((int *) ml->host_pointer + 1024));
+				printf("%d ", *((int *) ml->host_pointer + 2048));
+				printf("%d\n", *((int *) ml->host_pointer + 3072));
+				for(count=0; count<4096; count++){
+					*((int *) ml->host_pointer + count) = 4096-count;
+				}
 				printf("%d ", *((int *) ml->host_pointer));
 				printf("%d ", *((int *) ml->host_pointer + 1024));
 				printf("%d ", *((int *) ml->host_pointer + 2048));
