@@ -9,273 +9,316 @@
 
 #if defined(__linux__)
 #include <sys/mman.h>
-#include <sys/uio.h>
+#include <sys/ipc.h>
+#include <sys/shm.h>
 #endif
 
 #define DEBUG 1
 
 #define MEMLINK_UNUSED 0
 #define MEMLINK_USED 1
+#define MEMLINK_SHMMAX 33554432 /* default value orz */
 
 typedef struct Memlink{
-	  int status;
-    void *host_pointer; /* pointer to exchanged host memory. */
-    struct iovec *iov; /* pointers to HVAs. */
-    size_t size;
-    uint32_t max_size;
-		MemoryRegion *mr;
+	int status;
+	void *host_memory; /* pointer to exchanged host memory. */
+	void **hvas; /* pointer to pointers to HVAs. */
+	size_t size;
+	int *seg_ids; /* default 32M is not enough at all */
 } Memlink;
 
 typedef struct VirtIOMemlink
 {
-    VirtIODevice vdev;
-    VirtQueue *create_vq;
-    VirtQueue *revoke_vq;
-    Memlink memlinks[MEMLINK_MAX_LINKS];
-    VirtQueueElement stats_vq_elem;
-    DeviceState *qdev;
-    uint32_t state_count;
+	VirtIODevice vdev;
+	VirtQueue *create_vq;
+	VirtQueue *revoke_vq;
+	Memlink memlinks[MEMLINK_MAX_LINKS];
+	VirtQueueElement stats_vq_elem;
+	DeviceState *qdev;
+	uint32_t state_count;
 } VirtIOMemlink;
 
 static void virtio_memlink_link_address(struct Memlink *ml)
 {
-#if 0
-		struct iovec iov;
-		int fd[2];
+	unsigned long seg_count;
+	unsigned long mem_size = ml->size << VIRTIO_MEMLINK_PFN_SHIFT;
+	unsigned long i;
 
-		if (ml->status != MEMLINK_UNUSED) {
-			error_report("virtio-memlink requesting link on used memory");
-			exit(1);
+	if (ml->status != MEMLINK_UNUSED) {
+		error_report("virtio-memlink requesting link on used memory");
+		exit(1);
+	}
+
+	ml->status = MEMLINK_USED;
+
+	seg_count = mem_size/MEMLINK_SHMMAX + ((mem_size%MEMLINK_SHMMAX>0)?1:0);
+	ml->seg_ids = malloc(sizeof(int)*seg_count);
+	ml->host_memory = valloc(mem_size);
+
+	for(i=0; i<seg_count; i++){
+		unsigned long seg_start, seg_size, page_per_seg, page_start, j;
+	  void *seg_memory, *host_seg_memory, *original_memory;
+
+		printf("%lu\n", i);
+
+		seg_start = i*MEMLINK_SHMMAX;
+		page_start = seg_start >> VIRTIO_MEMLINK_PFN_SHIFT;
+		seg_size = mem_size-seg_start;
+		if (seg_size > MEMLINK_SHMMAX) {
+			seg_size = MEMLINK_SHMMAX;
 		}
+		page_per_seg = seg_size >> VIRTIO_MEMLINK_PFN_SHIFT;
 
-		if (pipe(fd) < 0){
-			error_report("virtio-memlink failed to create pipe");
-			exit(1);
-		}
+	  ml->seg_ids[i] = shmget(IPC_PRIVATE, seg_size, IPC_CREAT | SHM_NORESERVE);
+	  if (ml->seg_ids[i] < 0){
+	  	error_report("virtio-memlink shmget error");
+	  	perror("error");
+	  	exit(1);
+	  }
 
-		ml->status = MEMLINK_USED;
+		/* ask for 2 pointers, one for host, one for guest */
+		seg_memory = shmat(ml->seg_ids[i], NULL, 0);
+		host_seg_memory = shmat(ml->seg_ids[i], NULL, 0);
+	  if (seg_memory == (void *) -1 || host_seg_memory == (void*) -1){
+	  	error_report("virtio-memlink shmat error");
+	  	perror("error");
+	  	exit(1);
+	  }
 
-	  ml->host_pointer = valloc(4096*ml->size); /* FIXME: page size constant */
-		iov.iov_base = ml->host_pointer;
-		iov.iov_len = 4096*ml->size;
+		original_memory = valloc(seg_size);
 
-		vmsplice(fd[1], ml->iov, ml->size, SPLICE_F_GIFT);
-		vmsplice(fd[0], &iov, ml->size, 0);
-#endif
+	  for (j=0; j<page_per_seg; j++) {
+			printf("j:%lu, page_start+j:%lu, ml->hvas: %p\n", j, page_start+j, ml->hvas[page_start+j]);
+	  	mremap(ml->hvas[page_start+j], 4096, 4096, MREMAP_MAYMOVE | MREMAP_FIXED, original_memory+(j<<VIRTIO_MEMLINK_PFN_SHIFT));
+	  	mremap(seg_memory+(j<<VIRTIO_MEMLINK_PFN_SHIFT), 4096, 4096, MREMAP_MAYMOVE | MREMAP_FIXED, ml->hvas[page_start+j]);
+	  }
+
+		memcpy(host_seg_memory, original_memory, seg_size);
+	 	mremap(host_seg_memory, seg_size, seg_size, MREMAP_MAYMOVE | MREMAP_FIXED, ml->host_memory+seg_start);
+		free(original_memory);
+	}
 }
 
 static void virtio_memlink_revoke_address(struct Memlink *ml)
 {
-#if 0
-		if (ml->status != MEMLINK_USED) {
-			error_report("virtio-memlink revoking link on unused memory");
-			exit(1);
+	unsigned long seg_count;
+	unsigned long mem_size = ml->size << VIRTIO_MEMLINK_PFN_SHIFT;
+	unsigned long i;
+
+	if (ml->status != MEMLINK_USED) {
+		error_report("virtio-memlink revoking link on unused memory");
+		exit(1);
+	}
+
+	seg_count = mem_size/MEMLINK_SHMMAX + ((mem_size%MEMLINK_SHMMAX>0)?1:0);
+
+	for(i=0; i<seg_count; i++){
+		unsigned long seg_start, seg_size, page_start, j;
+	  void *seg_memory, *host_seg_memory, *original_memory;
+
+		seg_start = i*MEMLINK_SHMMAX;
+		page_start = seg_start >> 12;
+		seg_size = mem_size-seg_start;
+		if (seg_size > MEMLINK_SHMMAX) {
+			seg_size = MEMLINK_SHMMAX;
 		}
 
-		free(ml->iov);
-		ml->status = MEMLINK_UNUSED;
-#endif
+	  host_seg_memory = valloc(seg_size);
+	  seg_memory = valloc(seg_size);
+	  original_memory = valloc(seg_size);
+
+	 	mremap(ml->host_memory+seg_start, seg_size, seg_size, MREMAP_MAYMOVE | MREMAP_FIXED, host_seg_memory);
+	  memcpy(original_memory, host_seg_memory, seg_size);
+
+	  for (j=0; j<ml->size; j++) {
+	  	mremap(ml->hvas[page_start+j], 4096, 4096, MREMAP_MAYMOVE | MREMAP_FIXED, seg_memory+(j<<VIRTIO_MEMLINK_PFN_SHIFT));
+	  	mremap(original_memory+(j<<VIRTIO_MEMLINK_PFN_SHIFT), 4096, 4096, MREMAP_MAYMOVE | MREMAP_FIXED, ml->hvas[page_start+j]);
+	  }
+
+	  /* remove shared memory */
+	  shmdt(host_seg_memory);
+	  shmdt(seg_memory);
+	  shmctl(ml->seg_ids[i], IPC_RMID, NULL);
+
+	  free(ml->hvas);
+	}
+
+	ml->status = MEMLINK_UNUSED;
 }
 
 static void virtio_memlink_handle_create(VirtIODevice *vdev, VirtQueue *vq)
 {
-    VirtQueueElement elem;
-    MemoryRegionSection section;
-    VirtIOMemlink *vml = DO_UPCAST(VirtIOMemlink, vdev, vdev);
+	VirtQueueElement elem;
+	VirtIOMemlink *vml = DO_UPCAST(VirtIOMemlink, vdev, vdev);
 
-    while (virtqueue_pop(vq, &elem)) {
-        int count = 0;
-        uint32_t pfn;
-				Memlink *ml;
-				int memlink_id;
+	while (virtqueue_pop(vq, &elem)) {
+		Memlink *ml;
+		int memlink_id;
+		int i;
 
-        #if DEBUG
-            printf("link pfns:");
-        #endif
+		if (elem.out_sg[0].iov_len != sizeof(int) || elem.out_sg[1].iov_len != sizeof(uint32_t)){
+			error_report("virtio-memlink invalid size header");
+			exit(1);
+		}
 
+		memlink_id = ldl_p(elem.out_sg[0].iov_base);
+		if (memlink_id < 0 || memlink_id > MEMLINK_MAX_LINKS) {
+			error_report("virtio-memlink invalid id");
+			exit(1);
+		}
 
-				if (elem.out_sg[0].iov_len != sizeof(int) || elem.out_sg[1].iov_len != sizeof(uint32_t)){
-					error_report("virtio-memlink invalid size header");
-					exit(1);
-				}
+		ml = &vml->memlinks[memlink_id];
+		ml->size = ldl_p(elem.out_sg[1].iov_base);
+		if (elem.out_sg[2].iov_len != sizeof(uint32_t) * ml->size) {
+			error_report("virtio-memlink invalid size");
+			exit(1);
+		}
 
-				memlink_id = ldl_p(elem.out_sg[0].iov_base);
-				if (memlink_id < 0 || memlink_id > MEMLINK_MAX_LINKS) {
-					error_report("virtio-memlink invalid id");
-					exit(1);
-				}
+		ml->hvas = malloc(sizeof(void *) * ml->size);
 
-				ml = &vml->memlinks[memlink_id];
+  	for (i=0; i<ml->size; i++) {
+			uint32_t gfn;
+			MemoryRegionSection section;
+			ram_addr_t pa;
 
-				ml->max_size = ldl_p(elem.out_sg[1].iov_base);
-				if (elem.out_sg[2].iov_len != sizeof(uint32_t) * ml->max_size) {
-					error_report("virtio-memlink invalid size");
-					exit(1);
-				}
+		  gfn = ldl_p(elem.out_sg[2].iov_base+(sizeof(uint32_t)*i));
+		  pa = (ram_addr_t) gfn << VIRTIO_MEMLINK_PFN_SHIFT;
+	    section = memory_region_find(get_system_memory(), pa, 1);
 
-				ml->iov = malloc(sizeof(struct iovec) * ml->max_size);
-				ml->size = 0;
+  	  if (!section.size || !memory_region_is_ram(section.mr)){
+  	  	error_report("virtio-memlink memory_region_find error");
+  	  	exit(1);
+  		}
 
-        #if DEBUG
-            printf(" (size %u)", ml->max_size);
-        #endif
+  		ml->hvas[i] = memory_region_get_ram_ptr(section.mr) + section.offset_within_region;
+  	}
 
-				for (count = 0; count < ml->max_size; count++){
-            ram_addr_t pa;
-            ram_addr_t addr;
+		virtio_memlink_link_address(ml);
 
-            pfn = ldl_p(elem.out_sg[2].iov_base+sizeof(pfn)*count);
+  	for (i=0; i<ml->size; i++) {
+			printf("%d ", *((int *) ml->host_memory+i*1024));
+  	}
+		printf("\n");
 
-            #if DEBUG
-                printf(" %d", pfn);
-            #endif
+  	for (i=0; i<ml->size*1024; i++) {
+			*((int *) ml->host_memory + i) = ml->size*1024-i;
+  	}
 
-            pa = (ram_addr_t)ldl_p(&pfn) << VIRTIO_MEMLINK_PFN_SHIFT;
+  	for (i=0; i<ml->size; i++) {
+			printf("%d ", *((int *) ml->host_memory+i*1024));
+  	}
+		printf("\n");
 
-            section = memory_region_find(get_system_memory(), pa, 1);
-            if (!section.size || !memory_region_is_ram(section.mr))
-                continue;
-
-						/* TODO: mr may not be the same in one request */
-						ml->mr = section.mr;
-
-            addr = section.offset_within_region;
-
-						ml->iov[ml->size].iov_base = memory_region_get_ram_ptr(section.mr) + addr;
-						ml->iov[ml->size].iov_len = 4096;
-						ml->size += 1;
-						if(ml->size >= ml->max_size) break;
-        }
-
-        #if DEBUG
-            printf("\n");
-        #endif
-
-        virtio_memlink_link_address(ml);
-
-				// XXX: test
-				printf("%d ", *((int *) ml->host_pointer));
-				printf("%d ", *((int *) ml->host_pointer + 1024));
-				printf("%d ", *((int *) ml->host_pointer + 2048));
-				printf("%d\n", *((int *) ml->host_pointer + 3072));
-				for(count=0; count<4096; count++){
-					*((int *) ml->host_pointer + count) = 4096-count;
-				}
-				printf("%d ", *((int *) ml->host_pointer));
-				printf("%d ", *((int *) ml->host_pointer + 1024));
-				printf("%d ", *((int *) ml->host_pointer + 2048));
-				printf("%d\n", *((int *) ml->host_pointer + 3072));
-
-        virtqueue_push(vq, &elem, 0);
-        virtio_notify(vdev, vq);
-    }
+		virtqueue_push(vq, &elem, 0);
+		virtio_notify(vdev, vq);
+	}
 }
 
 static void virtio_memlink_handle_revoke(VirtIODevice *vdev, VirtQueue *vq)
 {
-    VirtQueueElement elem;
-    VirtIOMemlink *vml = DO_UPCAST(VirtIOMemlink, vdev, vdev);
+	VirtQueueElement elem;
+	VirtIOMemlink *vml = DO_UPCAST(VirtIOMemlink, vdev, vdev);
 
-    while (virtqueue_pop(vq, &elem)) {
-				int memlink_id;
+	while (virtqueue_pop(vq, &elem)) {
+		int memlink_id;
 
-				if (elem.out_sg[0].iov_len != sizeof(int)){
-					error_report("virtio-memlink invalid size header");
-					exit(1);
-				}
+		if (elem.out_sg[0].iov_len != sizeof(int)){
+			error_report("virtio-memlink invalid size header");
+			exit(1);
+		}
 
-				memlink_id = ldl_p(elem.out_sg[0].iov_base);
+		memlink_id = ldl_p(elem.out_sg[0].iov_base);
 
-				if (memlink_id < 0 || memlink_id > MEMLINK_MAX_LINKS) {
-					error_report("virtio-memlink invalid id");
-					exit(1);
-				}
+		if (memlink_id < 0 || memlink_id > MEMLINK_MAX_LINKS) {
+			error_report("virtio-memlink invalid id");
+			exit(1);
+		}
 
-        #if DEBUG
-            printf("virtio-memlink revoke id: %d\n", memlink_id);
-        #endif
+#if DEBUG
+		printf("virtio-memlink revoke id: %d\n", memlink_id);
+#endif
 
-        virtio_memlink_revoke_address(&vml->memlinks[memlink_id]);
+		virtio_memlink_revoke_address(&vml->memlinks[memlink_id]);
 
-        virtqueue_push(vq, &elem, 0);
-        virtio_notify(vdev, vq);
-    }
+		virtqueue_push(vq, &elem, 0);
+		virtio_notify(vdev, vq);
+	}
 }
 
 static void virtio_memlink_get_config(VirtIODevice *vdev, uint8_t *config_data)
 {
-    #if DEBUG
-        printf("virtio_memlink_get_config\n");
-    #endif
+#if DEBUG
+	printf("virtio_memlink_get_config\n");
+#endif
 }
 
 static void virtio_memlink_set_config(VirtIODevice *vdev, const uint8_t *config_data)
 {
-    #if DEBUG
-        printf("virtio_memlink_set_config\n");
-    #endif
+#if DEBUG
+	printf("virtio_memlink_set_config\n");
+#endif
 }
 
 static uint32_t virtio_memlink_get_features(VirtIODevice *vdev, uint32_t f)
 {
-    #if DEBUG
-        printf("virtio_memlink_get_features\n");
-    #endif
-    return 0;
+#if DEBUG
+	printf("virtio_memlink_get_features\n");
+#endif
+	return 0;
 }
 
 static void virtio_memlink_save(QEMUFile *f, void *opaque)
 {
-    #if DEBUG
-        printf("virtio_memlink_save\n");
-    #endif
+#if DEBUG
+	printf("virtio_memlink_save\n");
+#endif
 }
 
 static int virtio_memlink_load(QEMUFile *f, void *opaque, int version_id)
 {
-    #if DEBUG
-        printf("virtio_memlink_load\n");
-    #endif
-    // TODO
-    return 0;
+#if DEBUG
+	printf("virtio_memlink_load\n");
+#endif
+	// TODO
+	return 0;
 }
 
 VirtIODevice *virtio_memlink_init(DeviceState *dev)
 {
-    VirtIOMemlink *s;
-		int i;
+	VirtIOMemlink *s;
+	int i;
 
-    s = (VirtIOMemlink *)virtio_common_init("virtio-memlink",
-                                            VIRTIO_ID_MEMLINK,
-                                            0, sizeof(VirtIOMemlink));
+	s = (VirtIOMemlink *)virtio_common_init("virtio-memlink",
+			VIRTIO_ID_MEMLINK,
+			0, sizeof(VirtIOMemlink));
 
-    s->vdev.get_config = virtio_memlink_get_config;
-    s->vdev.set_config = virtio_memlink_set_config;
-    s->vdev.get_features = virtio_memlink_get_features;
+	s->vdev.get_config = virtio_memlink_get_config;
+	s->vdev.set_config = virtio_memlink_set_config;
+	s->vdev.get_features = virtio_memlink_get_features;
 
-    s->create_vq = virtio_add_queue(&s->vdev, 1024, virtio_memlink_handle_create);
-    s->revoke_vq = virtio_add_queue(&s->vdev, 1024, virtio_memlink_handle_revoke);
+	s->create_vq = virtio_add_queue(&s->vdev, 1024, virtio_memlink_handle_create);
+	s->revoke_vq = virtio_add_queue(&s->vdev, 1024, virtio_memlink_handle_revoke);
 
-    s->qdev = dev;
-    register_savevm(dev, "virtio-memlink", -1, 1,
-                    virtio_memlink_save, virtio_memlink_load, s);
+	s->qdev = dev;
+	register_savevm(dev, "virtio-memlink", -1, 1,
+			virtio_memlink_save, virtio_memlink_load, s);
 
-		for(i=0; i<MEMLINK_MAX_LINKS; i++){
-				s->memlinks[i].status = MEMLINK_UNUSED;
-		}
-    #if DEBUG
-        printf("virtio_memlink_init\n");
-    #endif
-    return &s->vdev;
+	for(i=0; i<MEMLINK_MAX_LINKS; i++){
+		s->memlinks[i].status = MEMLINK_UNUSED;
+	}
+#if DEBUG
+	printf("virtio_memlink_init\n");
+#endif
+	return &s->vdev;
 }
 
 void virtio_memlink_exit(VirtIODevice *vdev)
 {
-    VirtIOMemlink *s = DO_UPCAST(VirtIOMemlink, vdev, vdev);
+	VirtIOMemlink *s = DO_UPCAST(VirtIOMemlink, vdev, vdev);
 
-    unregister_savevm(s->qdev, "virtio-memlink", s);
-    virtio_cleanup(vdev);
-    #if DEBUG
-        printf("virtio_memlink_exit\n");
-    #endif
+	unregister_savevm(s->qdev, "virtio-memlink", s);
+	virtio_cleanup(vdev);
+#if DEBUG
+	printf("virtio_memlink_exit\n");
+#endif
 }
