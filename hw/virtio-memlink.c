@@ -81,7 +81,7 @@ static void virtio_memlink_link_address(struct Memlink *ml)
 		}
 		page_per_seg = seg_size >> VIRTIO_MEMLINK_PFN_SHIFT;
 
-		ml->seg_ids[i] = shmget(IPC_PRIVATE, seg_size, IPC_CREAT | SHM_NORESERVE);
+		ml->seg_ids[i] = shmget(IPC_PRIVATE, seg_size, IPC_CREAT | SHM_NORESERVE | IPC_EXCL | 0666);
 		if (ml->seg_ids[i] < 0){
 			error_report("virtio-memlink shmget error");
 			perror("error");
