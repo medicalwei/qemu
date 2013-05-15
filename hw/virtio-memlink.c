@@ -22,8 +22,10 @@
 typedef struct Memlink{
 	int status;
 	void *host_memory; /* pointer to exchanged host memory. */
+	void *linked_hva; /* offseted address of memlink */
 	void **hvas; /* pointer to pointers to HVAs. */
 	size_t size;
+	size_t num_pfns;
 	int *seg_ids; /* default 32M is not enough at all */
 } Memlink;
 
@@ -52,7 +54,7 @@ static int virtio_get_unused_memlink(struct VirtIOMemlink *vml)
 static void virtio_memlink_link_address(struct Memlink *ml)
 {
 	unsigned long seg_count;
-	unsigned long mem_size = ml->size << VIRTIO_MEMLINK_PFN_SHIFT;
+	unsigned long mem_size = ml->num_pfns << VIRTIO_MEMLINK_PFN_SHIFT;
 	unsigned long i;
 
 	if (ml->status != MEMLINK_UNUSED) {
@@ -114,7 +116,7 @@ static void virtio_memlink_link_address(struct Memlink *ml)
 static void virtio_memlink_revoke_address(struct Memlink *ml)
 {
 	unsigned long seg_count;
-	unsigned long mem_size = ml->size << VIRTIO_MEMLINK_PFN_SHIFT;
+	unsigned long mem_size = ml->num_pfns << VIRTIO_MEMLINK_PFN_SHIFT;
 	unsigned long i;
 
 	if (ml->status != MEMLINK_USED) {
@@ -142,7 +144,7 @@ static void virtio_memlink_revoke_address(struct Memlink *ml)
 		mremap(ml->host_memory+seg_start, seg_size, seg_size, MREMAP_MAYMOVE | MREMAP_FIXED, host_seg_memory);
 		memcpy(original_memory, host_seg_memory, seg_size);
 
-		for (j=0; j<ml->size; j++) {
+		for (j=0; j<ml->num_pfns; j++) {
 			mremap(ml->hvas[page_start+j], 4096, 4096, MREMAP_MAYMOVE | MREMAP_FIXED, seg_memory+(j<<VIRTIO_MEMLINK_PFN_SHIFT));
 			mremap(original_memory+(j<<VIRTIO_MEMLINK_PFN_SHIFT), 4096, 4096, MREMAP_MAYMOVE | MREMAP_FIXED, ml->hvas[page_start+j]);
 		}
@@ -167,28 +169,38 @@ static void virtio_memlink_handle_create(VirtIODevice *vdev, VirtQueue *vq)
 		Memlink *ml;
 		int memlink_id;
 		int i;
+		int num_pfns;
 
 		if (elem.in_sg[0].iov_len != sizeof(int) || elem.out_sg[0].iov_len != sizeof(uint32_t)){
 			error_report("virtio-memlink invalid size header");
-			exit(1);
 		}
 
 		memlink_id = virtio_get_unused_memlink(vml);
 		ml = &vml->memlinks[memlink_id];
 		ml->size = ldl_p(elem.out_sg[0].iov_base);
-		if (elem.out_sg[1].iov_len != sizeof(uint32_t) * ml->size) {
-			error_report("virtio-memlink invalid size");
-			exit(1);
+
+		ml->offset = ldl_p(elem.out_sg[1].iov_base);
+		if (ml->offset < 0 || ml->offset >= PAGE_SIZE) {
+			error_report("virtio-memlink invalid offset");
 		}
 
-		ml->hvas = malloc(sizeof(void *) * ml->size);
+		ml->num_pfns = (ml->size + ml->offset)/PAGE_SIZE;
+		if ((ml->size + ml->offset)%PAGE_SIZE > 0){
+			ml->num_pfns += 1;
+		}
 
-		for (i=0; i<ml->size; i++) {
+		if (elem.out_sg[2].iov_len != sizeof(uint32_t) * num_pfns) {
+			error_report("virtio-memlink invalid size");
+		}
+
+		ml->hvas = malloc(sizeof(void *) * ml->num_pfns);
+
+		for (i=0; i<ml->num_pfns; i++) {
 			uint32_t gfn;
 			MemoryRegionSection section;
 			ram_addr_t pa;
 
-			gfn = ldl_p(elem.out_sg[1].iov_base+(sizeof(uint32_t)*i));
+			gfn = ldl_p(elem.out_sg[2].iov_base+(sizeof(uint32_t)*i));
 			pa = (ram_addr_t) gfn << VIRTIO_MEMLINK_PFN_SHIFT;
 			section = memory_region_find(get_system_memory(), pa, 1);
 
@@ -201,18 +213,20 @@ static void virtio_memlink_handle_create(VirtIODevice *vdev, VirtQueue *vq)
 		}
 
 		virtio_memlink_link_address(ml);
+		ml->linked_hva = ml->host_memory + ml->offset;
 
+		/* this is test area. TODO: remove test area */
 		for (i=0; i<ml->size; i++) {
-			printf("%d ", *((int *) ml->host_memory+i*1024));
+			printf("%d ", *((int *) ml->linked_hva+i));
 		}
 		printf("\n");
 
-		for (i=0; i<ml->size*1024; i++) {
-			*((int *) ml->host_memory + i) = ml->size*1024-i;
+		for (i=0; i<ml->size; i++) {
+			*((int *) ml->linked_hva + i) = ml->linked_hva-i;
 		}
 
 		for (i=0; i<ml->size; i++) {
-			printf("%d ", *((int *) ml->host_memory+i*1024));
+			printf("%d ", *((int *) ml->linked_hva+i));
 		}
 		printf("\n");
 
