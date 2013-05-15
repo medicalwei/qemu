@@ -8,6 +8,7 @@
 #define VIRTIO_ID_MEMLINK 65535
 
 /* Size of a PFN in the memlink interface. */
+#define VIRTIO_MEMLINK_PAGE_SIZE 4096
 #define VIRTIO_MEMLINK_PFN_SHIFT 12
 
 #define MEMLINK_MAX_LINKS 32
