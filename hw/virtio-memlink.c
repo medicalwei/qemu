@@ -168,22 +168,14 @@ static void virtio_memlink_handle_create(VirtIODevice *vdev, VirtQueue *vq)
 		int memlink_id;
 		int i;
 
-		if (elem.out_sg[2].iov_len != sizeof(int) || elem.out_sg[0].iov_len != sizeof(uint32_t)){
+		if (elem.in_sg[0].iov_len != sizeof(int) || elem.out_sg[0].iov_len != sizeof(uint32_t)){
 			error_report("virtio-memlink invalid size header");
 			exit(1);
 		}
 
-		/* TODO: use sg[0] as passback
-		   memlink_id = ldl_p(elem.out_sg[0].iov_base);
-		   if (memlink_id < 0 || memlink_id > MEMLINK_MAX_LINKS) {
-		   error_report("virtio-memlink invalid id");
-		   exit(1);
-		   }
-		   */
-
 		memlink_id = virtio_get_unused_memlink(vml);
 		ml = &vml->memlinks[memlink_id];
-		ml->size = ldl_p(elem.out_sg[1].iov_base);
+		ml->size = ldl_p(elem.out_sg[0].iov_base);
 		if (elem.out_sg[1].iov_len != sizeof(uint32_t) * ml->size) {
 			error_report("virtio-memlink invalid size");
 			exit(1);
