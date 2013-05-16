@@ -171,17 +171,17 @@ static void virtio_memlink_handle_create(VirtIODevice *vdev, VirtQueue *vq)
 		int memlink_id;
 		int i;
 
-		if (elem.in_sg[0].iov_len != sizeof(int) || elem.out_sg[0].iov_len != sizeof(uint32_t)){
-			error_report("virtio-memlink invalid size header");
-		}
-
 		memlink_id = virtio_get_unused_memlink(vml);
 		ml = &vml->memlinks[memlink_id];
 		ml->size = ldl_p(elem.out_sg[0].iov_base);
 
 		ml->offset = ldl_p(elem.out_sg[1].iov_base);
-		if (ml->offset < 0 || ml->offset >= VIRTIO_MEMLINK_PAGE_SIZE) { /* FIXME: constant value */
+		if (ml->offset < 0 || ml->offset >= VIRTIO_MEMLINK_PAGE_SIZE) {
 			error_report("virtio-memlink invalid offset");
+#if DEBUG
+			printf("offset %d\n", ml->offset);
+#endif
+			exit(1);
 		}
 
 		ml->num_pfns = (ml->size + ml->offset)/VIRTIO_MEMLINK_PAGE_SIZE;
@@ -191,6 +191,10 @@ static void virtio_memlink_handle_create(VirtIODevice *vdev, VirtQueue *vq)
 
 		if (elem.out_sg[2].iov_len != sizeof(uint32_t) * ml->num_pfns) {
 			error_report("virtio-memlink invalid size");
+#if DEBUG
+			printf("size %lu, offset %d, iov_len %lu\n", ml->size, ml->offset, elem.out_sg[2].iov_len);
+#endif
+			exit(1);
 		}
 
 		ml->hvas = malloc(sizeof(void *) * ml->num_pfns);
