@@ -24,10 +24,10 @@ typedef struct Memlink{
 	void *host_memory; /* pointer to exchanged host memory. */
 	void *linked_hva; /* offseted address of memlink */
 	void **hvas; /* pointer to pointers to HVAs. */
-	size_t size;
-	size_t num_pfns;
+	unsigned int size;
+	unsigned int offset;
+	unsigned int num_pfns;
 	int *seg_ids; /* default 32M is not enough at all */
-	int offset;
 } Memlink;
 
 typedef struct VirtIOMemlink
@@ -176,10 +176,10 @@ static void virtio_memlink_handle_create(VirtIODevice *vdev, VirtQueue *vq)
 		ml->size = ldl_p(elem.out_sg[0].iov_base);
 
 		ml->offset = ldl_p(elem.out_sg[1].iov_base);
-		if (ml->offset < 0 || ml->offset >= VIRTIO_MEMLINK_PAGE_SIZE) {
+		if (ml->offset >= VIRTIO_MEMLINK_PAGE_SIZE) {
 			error_report("virtio-memlink invalid offset");
 #if DEBUG
-			printf("offset %d\n", ml->offset);
+			printf("offset %u\n", ml->offset);
 #endif
 			exit(1);
 		}
@@ -192,7 +192,7 @@ static void virtio_memlink_handle_create(VirtIODevice *vdev, VirtQueue *vq)
 		if (elem.out_sg[2].iov_len != sizeof(uint32_t) * ml->num_pfns) {
 			error_report("virtio-memlink invalid size");
 #if DEBUG
-			printf("size %lu, offset %d, iov_len %lu\n", ml->size, ml->offset, elem.out_sg[2].iov_len);
+			printf("size %u, offset %u, iov_len %ld\n", ml->size, ml->offset, elem.out_sg[2].iov_len);
 #endif
 			exit(1);
 		}
@@ -220,7 +220,7 @@ static void virtio_memlink_handle_create(VirtIODevice *vdev, VirtQueue *vq)
 		ml->linked_hva = ml->host_memory + ml->offset;
 
 		/* this is test area. TODO: remove test area */
-		for (i=0; i<ml->size/4; i++) {
+		for (i=0; i<ml->size/4; i+=1024) {
 			printf("%d ", *((int *) ml->linked_hva+i));
 		}
 		printf("\n");
@@ -229,7 +229,7 @@ static void virtio_memlink_handle_create(VirtIODevice *vdev, VirtQueue *vq)
 			*((int *) ml->linked_hva + i) = ml->size/4 - i;
 		}
 
-		for (i=0; i<ml->size/4; i++) {
+		for (i=0; i<ml->size/4; i+=1024) {
 			printf("%d ", *((int *) ml->linked_hva+i));
 		}
 		printf("\n");
