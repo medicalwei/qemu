@@ -28,14 +28,28 @@ typedef struct Memlink{
 	unsigned int offset;
 	unsigned int num_pfns;
 	int *seg_ids; /* default 32M is not enough at all */
+	Memlink *next, *pprev;
 } Memlink;
+
+typedef struct MemlinkMapItem
+{
+	ShmInfo* shm;
+	unsigned int offset;
+} MemlinkMapItem;
+
+typedef struct ShmInfo
+{
+	int id;
+	unsigned int usedcount;
+} ShmInfo;
 
 typedef struct VirtIOMemlink
 {
 	VirtIODevice vdev;
 	VirtQueue *create_vq;
 	VirtQueue *revoke_vq;
-	Memlink memlinks[MEMLINK_MAX_LINKS];
+	Memlink *memlink_list;
+	MemlinkMapItem *map;
 	VirtQueueElement stats_vq_elem;
 	DeviceState *qdev;
 	uint32_t state_count;
