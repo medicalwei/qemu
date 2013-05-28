@@ -26,7 +26,7 @@ typedef struct Memlink {
 	uint32_t *gfns;
 	unsigned int size;
 	unsigned int offset;
-	struct Memlink *next;
+	struct Memlink *next, *pprev;
 } Memlink;
 
 typedef struct ShmInfo {
@@ -232,6 +232,10 @@ static void virtio_memlink_handle_create(VirtIODevice *vdev, VirtQueue *vq)
 		Memlink *orig_memlink_head = vml->memlink_head;
 		vml->memlink_head = ml;
 		ml->next = orig_memlink_head;
+		ml->pprev = NULL;
+		if (ml->next != NULL){
+			ml->next->pprev = ml;
+		}
 
 		/* this is test area. TODO: remove test area */
 		for (i=0; i<ml->size/4; i+=1024) {
@@ -287,6 +291,16 @@ static void virtio_memlink_handle_revoke(VirtIODevice *vdev, VirtQueue *vq)
 		}
 
 		virtio_memlink_revoke_address(vml, ml);
+
+		if (ml->pprev != NULL) {
+			ml->pprev->next = ml->next;
+		} else {
+			vml->memlink_head = ml->next;
+		}
+		if (ml->next != NULL) {
+			ml->next->pprev = ml->pprev;
+		}
+		free(ml);
 
 		virtqueue_push(vq, &elem, 0);
 		virtio_notify(vdev, vq);
