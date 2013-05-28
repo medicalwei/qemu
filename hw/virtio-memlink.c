@@ -22,11 +22,11 @@
 typedef struct Memlink{
 	void *host_memory;
 	void *offseted_host_memory;
+	unsigned int num_gfns;
 	uint32_t *gfns;
 	unsigned int size;
 	unsigned int offset;
-	unsigned int num_pfns;
-	Memlink *next, *pprev;
+	Memlink *next;
 } Memlink;
 
 typedef struct MemlinkMapItem
@@ -199,65 +199,54 @@ static void virtio_memlink_handle_create(VirtIODevice *vdev, VirtQueue *vq)
 		int i;
 
 		memlink_id = virtio_get_unused_memlink(vml);
-		ml = &vml->memlinks[memlink_id];
+		ml = malloc(sizeof(Memlink));
 		ml->size = ldl_p(elem.out_sg[0].iov_base);
 
 		ml->offset = ldl_p(elem.out_sg[1].iov_base);
 		if (ml->offset >= VIRTIO_MEMLINK_PAGE_SIZE) {
 			error_report("virtio-memlink invalid offset");
-#if DEBUG
-			printf("offset %u\n", ml->offset);
-#endif
-			exit(1);
+			free(ml);
+			continue;
 		}
 
-		ml->num_pfns = (ml->size + ml->offset)/VIRTIO_MEMLINK_PAGE_SIZE;
+		ml->num_gfns = (ml->size + ml->offset)/VIRTIO_MEMLINK_PAGE_SIZE;
 		if ((ml->size + ml->offset)%VIRTIO_MEMLINK_PAGE_SIZE > 0){
-			ml->num_pfns += 1;
+			ml->num_gfns += 1;
 		}
 
-		if (elem.out_sg[2].iov_len != sizeof(uint32_t) * ml->num_pfns) {
+		if (elem.out_sg[2].iov_len != sizeof(uint32_t) * ml->num_gfns) {
 			error_report("virtio-memlink invalid size");
-#if DEBUG
-			printf("size %u, offset %u, iov_len %ld\n", ml->size, ml->offset, elem.out_sg[2].iov_len);
-#endif
-			exit(1);
+			free(ml);
+			continue;
 		}
 
-		ml->hvas = malloc(sizeof(void *) * ml->num_pfns);
+		ml->gfns = malloc(sizeof(uint32_t) * ml->num_gfns);
 
-		for (i=0; i<ml->num_pfns; i++) {
-			uint32_t gfn;
-			MemoryRegionSection section;
-			ram_addr_t pa;
-
-			gfn = ldl_p(elem.out_sg[2].iov_base+(sizeof(uint32_t)*i));
-			pa = (ram_addr_t) gfn << VIRTIO_MEMLINK_PFN_SHIFT;
-			section = memory_region_find(get_system_memory(), pa, 1);
-
-			if (!section.size || !memory_region_is_ram(section.mr)){
-				error_report("virtio-memlink memory_region_find error");
-				exit(1);
-			}
-
-			ml->hvas[i] = memory_region_get_ram_ptr(section.mr) + section.offset_within_region;
+		for (i=0; i<ml->num_gfns; i++) {
+			ml->gfns[i] = ldl_p(elem.out_sg[2].iov_base +
+					(sizeof(uint32_t)*i));
 		}
 
 		virtio_memlink_link_address(vml, ml);
-		ml->linked_hva = ml->host_memory + ml->offset;
+		ml->offseted_host_memory = ml->host_memory + ml->offset;
+
+		Memlink *orig_memlink_head = vml->memlink_head;
+		vml->memlink_head = ml;
+		ml->next = orig_memlink_head;
 
 		/* this is test area. TODO: remove test area */
 		for (i=0; i<ml->size/4; i+=1024) {
-			printf("%d ", *((int *) ml->linked_hva+i));
+			printf("%d ", *((int *) ml->offseted_host_memory+i));
 		}
 		printf("\n");
 
 		for (i=0; i<ml->size/4; i++) {
-			*((int *) ml->linked_hva + i) = ml->size/4 - i;
+			*((int *) ml->offseted_host_memory + i) =
+				ml->size/4 - i;
 		}
 
 		for (i=0; i<ml->size/4; i+=1024) {
-			printf("%d ", *((int *) ml->linked_hva+i));
+			printf("%d ", *((int *) ml->offseted_host_memory+i));
 		}
 		printf("\n");
 
@@ -276,23 +265,31 @@ static void virtio_memlink_handle_revoke(VirtIODevice *vdev, VirtQueue *vq)
 	while (virtqueue_pop(vq, &elem)) {
 		int memlink_id;
 
-		if (elem.out_sg[0].iov_len != sizeof(int)){
+		if (elem.out_sg[0].iov_len != sizeof(void *)){
 			error_report("virtio-memlink invalid size header");
-			exit(1);
+			continue;
 		}
 
-		memlink_id = ldl_p(elem.out_sg[0].iov_base);
-
-		if (memlink_id < 0 || memlink_id > MEMLINK_MAX_LINKS) {
-			error_report("virtio-memlink invalid id");
-			exit(1);
-		}
+		void * offseted_host_memory = ldl_p(elem.out_sg[0].iov_base);
 
 #if DEBUG
-		printf("virtio-memlink revoke id: %d\n", memlink_id);
+		printf("virtio-memlink revoke address: %d\n",
+				offseted_host_memory);
 #endif
 
-		virtio_memlink_revoke_address(&vml->memlinks[memlink_id]);
+		for (Memlink *ml = vml->memlink_head;
+				ml != NULL; ml = ml->next){
+			if (ml->offseted_host_memory == offseted_host_memory){
+				break;
+			}
+		}
+
+		if (ml == NULL) {
+			error_report("virtio-memlink memlink at the offset not found");
+			continue;
+		}
+
+		virtio_memlink_revoke_address(ml);
 
 		virtqueue_push(vq, &elem, 0);
 		virtio_notify(vdev, vq);
