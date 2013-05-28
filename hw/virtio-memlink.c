@@ -20,159 +20,172 @@
 #define MEMLINK_SHMMAX 33554432 /* default value orz */
 
 typedef struct Memlink{
-	int status;
-	void *host_memory; /* pointer to exchanged host memory. */
-	void *linked_hva; /* offseted address of memlink */
-	void **hvas; /* pointer to pointers to HVAs. */
+	void *host_memory;
+	void *offseted_host_memory;
+	uint32_t *gfns;
 	unsigned int size;
 	unsigned int offset;
 	unsigned int num_pfns;
-	int *seg_ids; /* default 32M is not enough at all */
 	Memlink *next, *pprev;
 } Memlink;
 
 typedef struct MemlinkMapItem
 {
-	ShmInfo* shm;
+	ShmInfo *shm;
 	unsigned int offset;
+	unsigned int usedcount;
+	void *orig;
 } MemlinkMapItem;
 
 typedef struct ShmInfo
 {
 	int id;
+	void *mem;
+	void *orig_mem;
 	unsigned int usedcount;
 } ShmInfo;
+
 
 typedef struct VirtIOMemlink
 {
 	VirtIODevice vdev;
 	VirtQueue *create_vq;
 	VirtQueue *revoke_vq;
-	Memlink *memlink_list;
+	Memlink *memlink_head;
 	MemlinkMapItem *map;
+	MemlinkMapItem shm_next;
 	VirtQueueElement stats_vq_elem;
 	DeviceState *qdev;
 	uint32_t state_count;
 } VirtIOMemlink;
 
-static int virtio_get_unused_memlink(struct VirtIOMemlink *vml)
+
+inline void * gfn_to_hva(uint32_t gfn)
 {
-	int i;
-	for(i=0; i<MEMLINK_MAX_LINKS; i++){
-		if(vml->memlinks[i].status == MEMLINK_UNUSED){
-			return i;
-		}
+	MemoryRegionSection section;
+	ram_addr_t pa;
+
+	pa = (ram_addr_t) gfn << VIRTIO_MEMLINK_PFN_SHIFT;
+	section = memory_region_find(get_system_memory(), pa, 1);
+
+	if (!section.size || !memory_region_is_ram(section.mr)){
+		return NULL;
 	}
-	return -ENOSPC;
+
+	return memory_region_get_ram_ptr(section.mr) +
+		section.offset_within_region;
 }
 
-static void virtio_memlink_link_address(struct Memlink *ml)
+void * get_shared_memory(VirtIOMemlink *vml, uint32_t gfn)
 {
-	unsigned long seg_count;
-	unsigned long mem_size = ml->num_pfns << VIRTIO_MEMLINK_PFN_SHIFT;
-	unsigned long i;
-
-	if (ml->status != MEMLINK_UNUSED) {
-		error_report("virtio-memlink requesting link on used memory");
-		/* TODO: not to exit the program. instead just return message */
-		exit(1);
+	MemlinkMapItem *item = &(vml->map[gfn]);
+	if (unlikely(item->shm != NULL)) {
+		item->usedcount += 1;
+		return item->shm->mem + item->offset;
 	}
 
-	ml->status = MEMLINK_USED;
+	if (unlikely(shm_next.shm == NULL)) {
+		ShmInfo* shminfo = (ShmInfo *) malloc(sizeof ShmInfo);
+		shminfo->id = shmget(IPC_PRIVATE, MEMLINK_SHMMAX,
+				IPC_CREAT | SHM_NORESERVE | IPC_EXCL | 0666);
+		if (shminfo->id == -1){
+			free(shminfo);
+			return NULL;
+		}
+		shminfo->mem = shmat(item->shmid, NULL, 0);
+		/* TODO: check memory leak with valloc then mremap */
+		shminfo->orig_mem = valloc(MEMLINK_SHMMAX);
+		shminfo->usedcount = 0;
 
-	seg_count = mem_size/MEMLINK_SHMMAX + ((mem_size%MEMLINK_SHMMAX>0)?1:0);
-	ml->seg_ids = malloc(sizeof(int)*seg_count);
+		vml->shm_next.shm = shminfo;
+		vml->shm_next.offset = 0;
+	}
+
+	item->shm = vml->shm_next.shm;
+	item->offset = vml->shm_next.offset;
+	item->usedcount += 1;
+	item->shm->usedcount += 1;
+
+	void * qemu_hva = gfn_to_hva(gfn);
+
+	mremap(qemu_hva, VIRTIO_MEMLINK_PAGE_SIZE, VIRTIO_MEMLINK_PAGE_SIZE,
+			MREMAP_MAYMOVE | MREMAP_FIXED,
+			item->shm->orig_mem + item->offset);
+	
+	/* http://lkml.indiana.edu/hypermail/linux/kernel/0401.1/0819.html 
+	 * shmat+mremap with old_len=0 technique from DOSEMU. */
+	mremap(item->shm->mem+item->offset, 0, VIRTIO_MEMLINK_PAGE_SIZE,
+			MREMAP_MAYMOVE | MREMAP_FIXED, qemu_hva);
+
+	vml->shm_next.offset += VIRTIO_MEMLINK_PAGE_SIZE;
+	if (vml->shm_next.offset >= MEMLINK_SHMMAX){
+		vml->shm_next.shm = NULL;
+	}
+
+	return item->shm->mem + item->offset;
+}
+
+void put_shared_memory(VirtIOMemlink *vml, unsigned int gfn)
+{
+	MemlinkMapItem *item = &(vml->map[gfn]);
+	MemlinkMapItem *shminfo = item->shm;
+
+	if (unlikely(item->usedcount == 0)){
+		return;
+	}
+
+	item->usedcount -= 1;
+
+	if (unlikely(item->usedcount > 0)){
+		return;
+	}
+
+	mremap(item->shm->orig_mem + item->offset,
+			VIRTIO_MEMLINK_PAGE_SIZE,
+			VIRTIO_MEMLINK_PAGE_SIZE,
+			MREMAP_MAYMOVE | MREMAP_FIXED, qemu_hva);
+
+	item->shm = NULL;
+
+	if (unlikely(shminfo->usedcount == 0)){
+		return;
+	}
+
+	shminfo->usedcount -= 1;
+
+	if (unlikely(shminfo->usedcount == 0)){
+		shmdt(shminfo->mem);
+		shmctl(shminfo->id, IPC_RMID, NULL);
+		if (vml->shm_next.shm == shminfo){
+			vml->shm_next.shm = NULL;
+		}
+		free(shminfo);
+	}
+}
+
+static void virtio_memlink_link_address(VirtIOMemlink *vml, Memlink *ml)
+{
+	unsigned long mem_size = ml->num_pfns << VIRTIO_MEMLINK_PFN_SHIFT;
+	int i;
+
 	ml->host_memory = valloc(mem_size);
 
-	for(i=0; i<seg_count; i++){
-		unsigned long seg_start, seg_size, page_per_seg, page_start, j;
-		void *seg_memory, *host_seg_memory, *original_memory;
-
-		printf("%lu\n", i);
-
-		seg_start = i*MEMLINK_SHMMAX;
-		page_start = seg_start >> VIRTIO_MEMLINK_PFN_SHIFT;
-		seg_size = mem_size-seg_start;
-		if (seg_size > MEMLINK_SHMMAX) {
-			seg_size = MEMLINK_SHMMAX;
-		}
-		page_per_seg = seg_size >> VIRTIO_MEMLINK_PFN_SHIFT;
-
-		ml->seg_ids[i] = shmget(IPC_PRIVATE, seg_size, IPC_CREAT | SHM_NORESERVE | IPC_EXCL | 0666);
-		if (ml->seg_ids[i] < 0){
-			error_report("virtio-memlink shmget error");
-			perror("error");
-			exit(1);
-		}
-
-		/* ask for 2 pointers, one for host, one for guest */
-		seg_memory = shmat(ml->seg_ids[i], NULL, 0);
-		host_seg_memory = shmat(ml->seg_ids[i], NULL, 0);
-		if (seg_memory == (void *) -1 || host_seg_memory == (void*) -1){
-			error_report("virtio-memlink shmat error");
-			perror("error");
-			exit(1);
-		}
-
-		original_memory = valloc(seg_size);
-
-		for (j=0; j<page_per_seg; j++) {
-			printf("j:%lu, page_start+j:%lu, ml->hvas: %p\n", j, page_start+j, ml->hvas[page_start+j]);
-			mremap(ml->hvas[page_start+j], 4096, 4096, MREMAP_MAYMOVE | MREMAP_FIXED, original_memory+(j<<VIRTIO_MEMLINK_PFN_SHIFT));
-			mremap(seg_memory+(j<<VIRTIO_MEMLINK_PFN_SHIFT), 4096, 4096, MREMAP_MAYMOVE | MREMAP_FIXED, ml->hvas[page_start+j]);
-		}
-
-		memcpy(host_seg_memory, original_memory, seg_size);
-		mremap(host_seg_memory, seg_size, seg_size, MREMAP_MAYMOVE | MREMAP_FIXED, ml->host_memory+seg_start);
-		free(original_memory);
+	for (i=0; i<ml->num_pfns; i++) {
+		void * shmem = get_shared_memory(vml, ml->gfns[i]);
+		uint32_t offset = i << VIRTIO_MEMLINK_PFN_SHIFT;
+		mremap(shmem, 0, VIRTIO_MEMLINK_PAGE_SIZE,
+				MREMAP_MAYMOVE | MREMAP_FIXED,
+				ml->host_memory + offset);
 	}
 }
 
-static void virtio_memlink_revoke_address(struct Memlink *ml)
+static void virtio_memlink_revoke_address(VirtIOMemlink *vml, Memlink *ml)
 {
-	unsigned long seg_count;
-	unsigned long mem_size = ml->num_pfns << VIRTIO_MEMLINK_PFN_SHIFT;
-	unsigned long i;
+	int i;
 
-	if (ml->status != MEMLINK_USED) {
-		error_report("virtio-memlink revoking link on unused memory");
-		exit(1);
+	for (i=0; i<ml->num_pfns; i++) {
+		put_shared_memory(vml, ml->gfns[i]);
 	}
-
-	seg_count = mem_size/MEMLINK_SHMMAX + ((mem_size%MEMLINK_SHMMAX>0)?1:0);
-
-	for(i=0; i<seg_count; i++){
-		unsigned long seg_start, seg_size, page_start, j;
-		void *seg_memory, *host_seg_memory, *original_memory;
-
-		seg_start = i*MEMLINK_SHMMAX;
-		page_start = seg_start >> 12;
-		seg_size = mem_size-seg_start;
-		if (seg_size > MEMLINK_SHMMAX) {
-			seg_size = MEMLINK_SHMMAX;
-		}
-
-		host_seg_memory = valloc(seg_size);
-		seg_memory = valloc(seg_size);
-		original_memory = valloc(seg_size);
-
-		mremap(ml->host_memory+seg_start, seg_size, seg_size, MREMAP_MAYMOVE | MREMAP_FIXED, host_seg_memory);
-		memcpy(original_memory, host_seg_memory, seg_size);
-
-		for (j=0; j<ml->num_pfns; j++) {
-			mremap(ml->hvas[page_start+j], 4096, 4096, MREMAP_MAYMOVE | MREMAP_FIXED, seg_memory+(j<<VIRTIO_MEMLINK_PFN_SHIFT));
-			mremap(original_memory+(j<<VIRTIO_MEMLINK_PFN_SHIFT), 4096, 4096, MREMAP_MAYMOVE | MREMAP_FIXED, ml->hvas[page_start+j]);
-		}
-
-		/* remove shared memory */
-		shmdt(host_seg_memory);
-		shmdt(seg_memory);
-		shmctl(ml->seg_ids[i], IPC_RMID, NULL);
-
-		free(ml->hvas);
-	}
-
-	ml->status = MEMLINK_UNUSED;
 }
 
 static void virtio_memlink_handle_create(VirtIODevice *vdev, VirtQueue *vq)
@@ -230,7 +243,7 @@ static void virtio_memlink_handle_create(VirtIODevice *vdev, VirtQueue *vq)
 			ml->hvas[i] = memory_region_get_ram_ptr(section.mr) + section.offset_within_region;
 		}
 
-		virtio_memlink_link_address(ml);
+		virtio_memlink_link_address(vml, ml);
 		ml->linked_hva = ml->host_memory + ml->offset;
 
 		/* this is test area. TODO: remove test area */
