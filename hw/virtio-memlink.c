@@ -55,11 +55,11 @@ typedef struct VirtIOMemlink {
 	uint32_t state_count;
 } VirtIOMemlink;
 
-void * gfn_to_hva(uint32_t gfn);
+void * gfn_to_hva(uint32_t gfn, uint32_t *offset_fn);
 void * get_shared_memory(VirtIOMemlink *vml, uint32_t gfn);
 void put_shared_memory(VirtIOMemlink *vml, unsigned int gfn);
 
-void * gfn_to_hva(uint32_t gfn)
+void * gfn_to_hva(uint32_t gfn, uint32_t *offset_fn)
 {
 	MemoryRegionSection section;
 	ram_addr_t pa;
@@ -71,13 +71,21 @@ void * gfn_to_hva(uint32_t gfn)
 		return NULL;
 	}
 
+	if (offset_fn != NULL) {
+		*offset_fn = section.offset_within_region
+			>> VIRTIO_MEMLINK_PFN_SHIFT;
+	}
+
 	return memory_region_get_ram_ptr(section.mr) +
 		section.offset_within_region;
 }
 
 void * get_shared_memory(VirtIOMemlink *vml, uint32_t gfn)
 {
-	MemlinkMapItem *item = &(vml->map[gfn]);
+	uint32_t offset_fn;
+	void * qemu_hva = gfn_to_hva(gfn, &offset_fn);
+	MemlinkMapItem *item = &vml->map[offset_fn];
+
 	if (unlikely(item->shm != NULL)) {
 		item->usedcount += 1;
 		return item->shm->mem + item->offset;
@@ -105,8 +113,6 @@ void * get_shared_memory(VirtIOMemlink *vml, uint32_t gfn)
 	item->usedcount += 1;
 	item->shm->usedcount += 1;
 
-	void * qemu_hva = gfn_to_hva(gfn);
-
 	mremap(qemu_hva, VIRTIO_MEMLINK_PAGE_SIZE, VIRTIO_MEMLINK_PAGE_SIZE,
 			MREMAP_MAYMOVE | MREMAP_FIXED,
 			item->shm->orig_mem + item->offset);
@@ -124,9 +130,11 @@ void * get_shared_memory(VirtIOMemlink *vml, uint32_t gfn)
 	return item->shm->mem + item->offset;
 }
 
-void put_shared_memory(VirtIOMemlink *vml, unsigned int gfn)
+void put_shared_memory(VirtIOMemlink *vml, uint32_t gfn)
 {
-	MemlinkMapItem *item = &(vml->map[gfn]);
+	uint32_t offset_fn;
+	void * qemu_hva = gfn_to_hva(gfn, &offset_fn);
+	MemlinkMapItem *item = &vml->map[offset_fn];
 	ShmInfo *shminfo = item->shm;
 
 	if (unlikely(item->usedcount == 0)){
@@ -138,8 +146,6 @@ void put_shared_memory(VirtIOMemlink *vml, unsigned int gfn)
 	if (unlikely(item->usedcount > 0)){
 		return;
 	}
-
-	void * qemu_hva = gfn_to_hva(gfn);
 
 	mremap(item->shm->orig_mem + item->offset,
 			VIRTIO_MEMLINK_PAGE_SIZE,
@@ -198,7 +204,7 @@ static void virtio_memlink_handle_create(VirtIODevice *vdev, VirtQueue *vq)
 		Memlink *ml;
 		int i;
 
-		ml = malloc(sizeof(Memlink));
+		ml = (Memlink *) malloc(sizeof(Memlink));
 		ml->size = ldl_p(elem.out_sg[0].iov_base);
 
 		ml->offset = ldl_p(elem.out_sg[1].iov_base);
@@ -219,7 +225,7 @@ static void virtio_memlink_handle_create(VirtIODevice *vdev, VirtQueue *vq)
 			continue;
 		}
 
-		ml->gfns = malloc(sizeof(uint32_t) * ml->num_gfns);
+		ml->gfns = (uint32_t *) malloc(sizeof(uint32_t) * ml->num_gfns);
 
 		for (i=0; i<ml->num_gfns; i++) {
 			ml->gfns[i] = ldl_p(elem.out_sg[2].iov_base +
@@ -244,9 +250,9 @@ static void virtio_memlink_handle_create(VirtIODevice *vdev, VirtQueue *vq)
 		printf("\n");
 
 		for (i=0; i<ml->size/4; i++) {
-			*((int *) ml->offseted_host_memory + i) =
-				ml->size/4 - i;
+			*((int *) ml->offseted_host_memory + i) = i;
 		}
+		printf("ml->size = %d\n", ml->size);
 
 		for (i=0; i<ml->size/4; i+=1024) {
 			printf("%d ", *((int *) ml->offseted_host_memory+i));
@@ -357,16 +363,30 @@ VirtIODevice *virtio_memlink_init(DeviceState *dev)
 	s->vdev.set_config = virtio_memlink_set_config;
 	s->vdev.get_features = virtio_memlink_get_features;
 
-	s->create_vq = virtio_add_queue(&s->vdev, 1024, virtio_memlink_handle_create);
-	s->revoke_vq = virtio_add_queue(&s->vdev, 1024, virtio_memlink_handle_revoke);
+	s->create_vq = virtio_add_queue(&s->vdev, 1024,
+			virtio_memlink_handle_create);
+	s->revoke_vq = virtio_add_queue(&s->vdev, 1024,
+			virtio_memlink_handle_revoke);
 
 	s->qdev = dev;
 	register_savevm(dev, "virtio-memlink", -1, 1,
 			virtio_memlink_save, virtio_memlink_load, s);
 
+	/* TODO: deal with high memory */
+	size_t map_size = ram_size/VIRTIO_MEMLINK_PAGE_SIZE
+			*sizeof(MemlinkMapItem) * 2;
+	s->map = (MemlinkMapItem *) malloc(map_size);
+	if (s->map == NULL) {
+		error_report("virtio-memlink: cannot allocate shm map.");
+        	exit(1);
+	}
+	memset(s->map, 0, map_size);
+
 	s->memlink_head = NULL;
+
 #if DEBUG
 	printf("virtio_memlink_init\n");
+	printf("map_size: %lu\n", map_size);
 #endif
 	return &s->vdev;
 }
@@ -374,6 +394,9 @@ VirtIODevice *virtio_memlink_init(DeviceState *dev)
 void virtio_memlink_exit(VirtIODevice *vdev)
 {
 	VirtIOMemlink *s = DO_UPCAST(VirtIOMemlink, vdev, vdev);
+
+	free(s->map);
+	/* TODO: cleanup map, memlinks and shms */
 
 	unregister_savevm(s->qdev, "virtio-memlink", s);
 	virtio_cleanup(vdev);
