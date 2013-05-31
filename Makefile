@@ -48,7 +48,7 @@ configure: ;
 
 $(call set-vpath, $(SRC_PATH))
 
-LIBS+=-lz $(LIBS_TOOLS)
+LIBS+=-lz $(LIBS_TOOLS) -libverbs
 
 HELPERS-$(CONFIG_LINUX) = qemu-bridge-helper$(EXESUF)
 

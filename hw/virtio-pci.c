@@ -914,6 +914,30 @@ static void virtio_memlink_exit_pci(PCIDevice *pci_dev)
     virtio_exit_pci(pci_dev);
 }
 
+static int virtio_ib_init_pci(PCIDevice *pci_dev)
+{
+    VirtIOPCIProxy *proxy = DO_UPCAST(VirtIOPCIProxy, pci_dev, pci_dev);
+    VirtIODevice *vdev;
+
+    vdev = virtio_ib_init(&pci_dev->qdev);
+    if (!vdev) {
+         return -1;
+    }
+
+    virtio_init_pci(proxy, vdev);
+    return 0;
+
+}
+
+static void virtio_ib_exit_pci(PCIDevice *pci_dev)
+{
+     VirtIOPCIProxy *proxy = DO_UPCAST(VirtIOPCIProxy, pci_dev, pci_dev);
+
+     virtio_pci_stop_ioeventfd(proxy);
+     virtio_ib_exit(proxy->vdev);
+     virtio_exit_pci(pci_dev);
+}
+
 static Property virtio_blk_properties[] = {
     DEFINE_PROP_HEX32("class", VirtIOPCIProxy, class_code, 0),
     DEFINE_BLOCK_PROPERTIES(VirtIOPCIProxy, blk.conf),
@@ -1116,6 +1140,34 @@ static TypeInfo virtio_memlink_info = {
     .class_init    = virtio_memlink_class_init,
 };
 
+static Property virtio_ib_properties[] = {
+    DEFINE_VIRTIO_COMMON_FEATURES(VirtIOPCIProxy, host_features),
+    DEFINE_PROP_HEX32("class", VirtIOPCIProxy, class_code, 0),
+    DEFINE_PROP_END_OF_LIST(),
+};
+
+static void virtio_ib_class_init(ObjectClass *klass, void *data)
+{
+    DeviceClass *dc = DEVICE_CLASS(klass);
+    PCIDeviceClass *k = PCI_DEVICE_CLASS(klass);
+
+    k->init = virtio_ib_init_pci;
+    k->exit = virtio_ib_exit_pci;
+    k->vendor_id = PCI_VENDOR_ID_REDHAT_QUMRANET;
+    k->device_id = PCI_DEVICE_ID_VIRTIO_IB; // NOTE: refer to ./pci-ids.txt, this device number is used for experimental usage.
+    k->revision = VIRTIO_PCI_ABI_VERSION;
+    k->class_id = PCI_CLASS_OTHERS;
+    dc->reset = virtio_pci_reset;
+    dc->props = virtio_ib_properties;
+}
+
+static TypeInfo virtio_ib_info = {
+    .name          = "virtio-ib-pci",
+    .parent        = TYPE_PCI_DEVICE,
+    .instance_size = sizeof(VirtIOPCIProxy),
+    .class_init    = virtio_ib_class_init,
+};
+
 static int virtio_scsi_init_pci(PCIDevice *pci_dev)
 {
     VirtIOPCIProxy *proxy = DO_UPCAST(VirtIOPCIProxy, pci_dev, pci_dev);
@@ -1180,6 +1232,7 @@ static void virtio_pci_register_types(void)
     type_register_static(&virtio_serial_info);
     type_register_static(&virtio_balloon_info);
     type_register_static(&virtio_memlink_info);
+    type_register_static(&virtio_ib_info);
     type_register_static(&virtio_scsi_info);
     type_register_static(&virtio_rng_info);
 }

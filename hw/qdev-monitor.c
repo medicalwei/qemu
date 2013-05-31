@@ -40,6 +40,7 @@ static const QDevAlias qdev_alias_table[] = {
     { "virtio-balloon-pci", "virtio-balloon",
             QEMU_ARCH_ALL & ~QEMU_ARCH_S390X },
     { "virtio-memlink-pci", "virtio-memlink", QEMU_ARCH_ALL & ~QEMU_ARCH_S390X },
+    { "virtio-ib-pci", "virtio-ib", QEMU_ARCH_ALL & ~QEMU_ARCH_S390X },
     { "virtio-blk-s390", "virtio-blk", QEMU_ARCH_S390X },
     { "virtio-net-s390", "virtio-net", QEMU_ARCH_S390X },
     { "virtio-serial-s390", "virtio-serial", QEMU_ARCH_S390X },
