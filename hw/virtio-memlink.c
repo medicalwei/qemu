@@ -122,6 +122,9 @@ void * get_shared_memory(VirtIOMemlink *vml, uint32_t gfn)
 	mremap(item->shm->mem+item->offset, 0, VIRTIO_MEMLINK_PAGE_SIZE,
 			MREMAP_MAYMOVE | MREMAP_FIXED, qemu_hva);
 
+	memcpy(qemu_hva, item->shm->orig_mem+item->offset,
+			VIRTIO_MEMLINK_PAGE_SIZE);
+
 	vml->shm_next.offset += VIRTIO_MEMLINK_PAGE_SIZE;
 	if (vml->shm_next.offset >= MEMLINK_SHMMAX){
 		vml->shm_next.shm = NULL;
@@ -146,6 +149,9 @@ void put_shared_memory(VirtIOMemlink *vml, uint32_t gfn)
 	if (unlikely(item->usedcount > 0)){
 		return;
 	}
+
+	memcpy(item->shm->orig_mem+item->offset, qemu_hva,
+			VIRTIO_MEMLINK_PAGE_SIZE);
 
 	mremap(item->shm->orig_mem + item->offset,
 			VIRTIO_MEMLINK_PAGE_SIZE,
