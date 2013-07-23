@@ -249,22 +249,6 @@ static void virtio_memlink_handle_create(VirtIODevice *vdev, VirtQueue *vq)
 			ml->next->pprev = ml;
 		}
 
-		/* this is test area. TODO: remove test area */
-		for (i=0; i<ml->size/4; i+=1024) {
-			printf("%d ", *((int *) ml->offseted_host_memory+i));
-		}
-		printf("\n");
-
-		for (i=0; i<ml->size/4; i++) {
-			*((int *) ml->offseted_host_memory + i) = i;
-		}
-		printf("ml->size = %d\n", ml->size);
-
-		for (i=0; i<ml->size/4; i+=1024) {
-			printf("%d ", *((int *) ml->offseted_host_memory+i));
-		}
-		printf("\n");
-
 		stq_p(elem.in_sg[0].iov_base, (uint64_t) ml->offseted_host_memory);
 
 		virtqueue_push(vq, &elem, 0);

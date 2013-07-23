@@ -29,10 +29,8 @@
 #include <alloca.h>
 
 #define VIRTIO_ID_IB 99
-#define DEBUG 1
-#define INIT_ELEM                                             \
+#define INIT_VIB_ELEM                                             \
     do {                                                    \
-           memset(&elem, 0, sizeof(elem));                  \
            memset(&vib->request.elem, 0, sizeof(elem));         \
     }while(0)
 
