@@ -9,8 +9,6 @@
 
 #if defined(__linux__)
 #include <sys/mman.h>
-#include <sys/ipc.h>
-#include <sys/shm.h>
 #endif
 
 #define DEBUG 1
@@ -31,7 +29,7 @@ typedef struct Memlink {
 
 typedef struct ShmInfo {
 	int id;
-	void *mem;
+	char filename[40];
 	void *orig_mem;
 	unsigned int usedcount;
 } ShmInfo;
@@ -93,13 +91,13 @@ void * get_shared_memory(VirtIOMemlink *vml, uint32_t gfn)
 
 	if (unlikely(vml->shm_next.shm == NULL)) {
 		ShmInfo* shminfo = (ShmInfo *) malloc(sizeof(ShmInfo));
-		shminfo->id = shmget(IPC_PRIVATE, MEMLINK_SHMMAX,
-				IPC_CREAT | SHM_NORESERVE | IPC_EXCL | 0666);
-		if (shminfo->id == -1){
+		sprintf(shminfo->filename, "virtio-memlink_%x", rand());
+		shminfo->id = shm_open(shminfo->filename, O_CREAT | O_RDWR, S_IRUSR | S_IWUSR);
+		if (shminfo->id < 0){
 			free(shminfo);
 			return NULL;
 		}
-		shminfo->mem = shmat(shminfo->id, NULL, 0);
+		ftruncate(shminfo->id, MEMLINK_SHMMAX);
 		/* TODO: check memory leak with valloc then mremap */
 		shminfo->orig_mem = valloc(MEMLINK_SHMMAX);
 		shminfo->usedcount = 0;
@@ -117,10 +115,8 @@ void * get_shared_memory(VirtIOMemlink *vml, uint32_t gfn)
 			MREMAP_MAYMOVE | MREMAP_FIXED,
 			item->shm->orig_mem + item->offset);
 	
-	/* http://lkml.indiana.edu/hypermail/linux/kernel/0401.1/0819.html 
-	 * shmat+mremap with old_len=0 technique from DOSEMU. */
-	mremap(item->shm->mem+item->offset, 0, VIRTIO_MEMLINK_PAGE_SIZE,
-			MREMAP_MAYMOVE | MREMAP_FIXED, qemu_hva);
+	mmap(qemu_hva, VIRTIO_MEMLINK_PAGE_SIZE, PROT_READ | PROT_WRITE,
+			MAP_SHARED | MAP_FIXED , item->shm->id, item->offset);
 
 	memcpy(qemu_hva, item->shm->orig_mem+item->offset,
 			VIRTIO_MEMLINK_PAGE_SIZE);
@@ -167,8 +163,7 @@ void put_shared_memory(VirtIOMemlink *vml, uint32_t gfn)
 	shminfo->usedcount -= 1;
 
 	if (unlikely(shminfo->usedcount == 0)){
-		shmdt(shminfo->mem);
-		shmctl(shminfo->id, IPC_RMID, NULL);
+		shm_unlink(shminfo->filename);
 		if (vml->shm_next.shm == shminfo){
 			vml->shm_next.shm = NULL;
 		}
