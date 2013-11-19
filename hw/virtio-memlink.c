@@ -15,7 +15,7 @@
 
 #define MEMLINK_UNUSED 0
 #define MEMLINK_USED 1
-#define MEMLINK_SHMMAX 33554432 /* default value orz */
+#define MEMLINK_SHMMAX 67108864
 
 typedef struct Memlink {
 	void *host_memory;
@@ -30,6 +30,7 @@ typedef struct Memlink {
 typedef struct ShmInfo {
 	int id;
 	char filename[40];
+	void *mem;
 	void *orig_mem;
 	unsigned int usedcount;
 } ShmInfo;
@@ -93,12 +94,21 @@ void * get_shared_memory(VirtIOMemlink *vml, uint32_t gfn)
 		ShmInfo* shminfo = (ShmInfo *) malloc(sizeof(ShmInfo));
 		sprintf(shminfo->filename, "virtio-memlink_%x", rand());
 		shminfo->id = shm_open(shminfo->filename, O_CREAT | O_RDWR, S_IRUSR | S_IWUSR);
+
 		if (shminfo->id < 0){
 			free(shminfo);
 			return NULL;
 		}
-		ftruncate(shminfo->id, MEMLINK_SHMMAX);
+
+		if (ftruncate(shminfo->id, MEMLINK_SHMMAX) != 0){
+			shm_unlink(shminfo->filename);
+			free(shminfo);
+			return NULL;
+		}
+
 		/* TODO: check memory leak with valloc then mremap */
+		shminfo->mem = mmap(NULL, VIRTIO_MEMLINK_PAGE_SIZE, PROT_READ | PROT_WRITE,
+			MAP_SHARED, item->shm->id, item->offset);
 		shminfo->orig_mem = valloc(MEMLINK_SHMMAX);
 		shminfo->usedcount = 0;
 

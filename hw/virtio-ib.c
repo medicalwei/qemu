@@ -1,7 +1,7 @@
 #include "virtio-ib.h"
 #include "qemu-error.h"
 
-#define DEBUG 0
+#define DEBUG 1
 
 typedef struct VirtIOIB
 {
@@ -250,7 +250,6 @@ static void virtio_ib_handle_read(VirtIODevice *vdev, VirtQueue *vq)
     VirtIOIB *vib = to_virtio_ib(vdev);
     VirtQueueElement elem;
 
-    int file_len;
     int ret_len = 0;
     int fd;
 
@@ -260,30 +259,26 @@ static void virtio_ib_handle_read(VirtIODevice *vdev, VirtQueue *vq)
         if(!memcmp(&vib->request.elem, &elem, sizeof(elem)))
             error_report("virtio-ib can not get write request\n");
 
-        memcpy(&file_len, elem.out_sg[0].iov_base, sizeof(int));
+        #if DEBUG
+            printf("read path:%s\n", (char*)(elem.out_sg[0].iov_base));
+        #endif
 
+        fd = open((char*)(elem.out_sg[0].iov_base), O_RDONLY);
 
-        if (file_len > 0){
-                #if DEBUG
-                    printf("read path:%s\n", (char*)(elem.out_sg[1].iov_base));
-                #endif
-
-                fd = open((char*)(elem.out_sg[1].iov_base), O_RDONLY);
-
-                if(fd < 0){
-                    error_report("virtio-ib read driver system file failed\n");
-                    return;
-                }
-
-                ret_len = read(fd, (char*)elem.in_sg[0].iov_base, file_len);
-
-                #if DEBUG
-                    printf("%s, %d\n", (char*)elem.in_sg[0].iov_base, ret_len);
-                #endif
-
-                close(fd);
+        if(fd < 0){
+            error_report("virtio-ib read driver system file failed\n");
+            return;
         }
-        elem.in_sg[0].iov_len = ret_len;
+
+        ret_len = read(fd, (char*)elem.in_sg[0].iov_base, sizeof(char) * 1024);
+
+        #if DEBUG
+            printf("%s, %d\n", (char*)elem.in_sg[0].iov_base, ret_len);
+        #endif
+
+        close(fd);
+
+        stl_p(elem.in_sg[1].iov_base, ret_len);
         virtqueue_push(vq, &elem, ret_len);
     }
     virtio_notify(vdev, vq);
