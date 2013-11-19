@@ -242,6 +242,7 @@ static void virtio_ib_handle_write(VirtIODevice *vdev, VirtQueue *vq)
         elem.in_sg[0].iov_len = sizeof(int);
         virtqueue_push(vq, &elem, ret_len);
     }
+    virtio_notify(vdev, vq);
 }
 
 static void virtio_ib_handle_read(VirtIODevice *vdev, VirtQueue *vq)
@@ -285,6 +286,7 @@ static void virtio_ib_handle_read(VirtIODevice *vdev, VirtQueue *vq)
         elem.in_sg[0].iov_len = ret_len;
         virtqueue_push(vq, &elem, ret_len);
     }
+    virtio_notify(vdev, vq);
     
     return;
 }
@@ -403,6 +405,7 @@ static void virtio_ib_handle_device(VirtIODevice *vdev, VirtQueue *vq)
         elem.in_sg[0].iov_len = sizeof(int);
         virtqueue_push(vq, &elem, ret_len);
     }
+    virtio_notify(vdev, vq);
 
     return;
 }
