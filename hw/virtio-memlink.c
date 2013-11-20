@@ -106,9 +106,8 @@ void * get_shared_memory(VirtIOMemlink *vml, uint32_t gfn)
 			return NULL;
 		}
 
-		/* TODO: check memory leak with valloc then mremap */
-		shminfo->mem = mmap(NULL, VIRTIO_MEMLINK_PAGE_SIZE, PROT_READ | PROT_WRITE,
-			MAP_SHARED, item->shm->id, item->offset);
+		shminfo->mem = mmap(NULL, MEMLINK_SHMMAX, PROT_READ | PROT_WRITE,
+			MAP_SHARED, shminfo->id, 0);
 		shminfo->orig_mem = valloc(MEMLINK_SHMMAX);
 		shminfo->usedcount = 0;
 

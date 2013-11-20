@@ -260,25 +260,25 @@ static void virtio_ib_handle_read(VirtIODevice *vdev, VirtQueue *vq)
             error_report("virtio-ib can not get write request\n");
 
         #if DEBUG
-            printf("read path:%s\n", (char*)(elem.out_sg[0].iov_base));
+            printf("read path:%s\n", (char*) elem.out_sg[0].iov_base);
         #endif
 
-        fd = open((char*)(elem.out_sg[0].iov_base), O_RDONLY);
+        fd = open((char*)elem.out_sg[0].iov_base, O_RDONLY);
 
         if(fd < 0){
             error_report("virtio-ib read driver system file failed\n");
             return;
         }
 
-        ret_len = read(fd, (char*)elem.in_sg[0].iov_base, sizeof(char) * 1024);
+        ret_len = read(fd, elem.in_sg[0].iov_base, elem.in_sg[0].iov_len);
 
         #if DEBUG
-            printf("%s, %d\n", (char*)elem.in_sg[0].iov_base, ret_len);
+            printf("%s, %d\n", (char*) elem.in_sg[0].iov_base, ret_len);
         #endif
 
         close(fd);
 
-        stl_p(elem.in_sg[1].iov_base, ret_len);
+        stq_p(elem.in_sg[1].iov_base, ret_len);
         virtqueue_push(vq, &elem, ret_len);
     }
     virtio_notify(vdev, vq);
@@ -354,10 +354,7 @@ static void virtio_ib_handle_device(VirtIODevice *vdev, VirtQueue *vq)
                 ret_len = sizeof(int);
                 break;
             case IB_USER_VERBS_CMD_CLOSE_DEV_FD:
-                memcpy(&i, elem.out_sg[2].iov_base, sizeof(int));
                 memcpy(&fd, elem.out_sg[1].iov_base, sizeof(fd));
-                if (i > -1)
-                    vib->pid2fd[i] = 0;
                 close(fd);
                 resp = 0;
                 ret_len = sizeof(int); 
