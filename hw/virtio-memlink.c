@@ -366,7 +366,6 @@ VirtIODevice *virtio_memlink_init(DeviceState *dev)
 	register_savevm(dev, "virtio-memlink", -1, 1,
 			virtio_memlink_save, virtio_memlink_load, s);
 
-	/* TODO: deal with high memory */
 	size_t map_size = ram_size/VIRTIO_MEMLINK_PAGE_SIZE
 			*sizeof(MemlinkMapItem) * 2;
 	s->map = (MemlinkMapItem *) malloc(map_size);
