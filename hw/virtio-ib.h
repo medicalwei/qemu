@@ -29,19 +29,8 @@
 #include <alloca.h>
 
 #define VIRTIO_ID_IB 99
-#define INIT_VIB_ELEM                                             \
-    do {                                                    \
-           memset(&vib->request.elem, 0, sizeof(elem));         \
-    }while(0)
 
-#define GET_INDEX(ptr) memcpy(&i, (ptr), sizeof(i));   
-
-#define GET_CMD_AND_HDR(header, pop_data, command, csize, hdr_size)            \
-    do{                                 \
-        (csize)   = (pop_data).out_sg[0].iov_len;                              \
-        (command) = (char*) (pop_data).out_sg[0].iov_base;                     \
-        memcpy((header), (command), (hdr_size));                               \
-    }while(0)
+#define GET_INDEX(ptr) memcpy(&i, (ptr), sizeof(i));
 
 #define CHANGE_RESP_ADDR(type, command, data) ((type*)(command))->response = (uintptr_t) (data).iov_base;
 
@@ -75,8 +64,7 @@ enum{
         IB_USER_VERBS_CMD_UNMAP,
         IB_USER_VERBS_CMD_RING_DOORBELL,
         IB_USER_VERBS_CMD_BUF_COPY,
-        IB_USER_VERBS_CMD_CLOSE_DEV_FD,
-        IB_USER_VERBS_CMD_GET_EVENT
+        IB_USER_VERBS_CMD_CLOSE_DEV_FD
 };
 
 struct vib_mmap{
@@ -85,6 +73,12 @@ struct vib_mmap{
         __u32 prot;
         __u32 flags;
         __u32 off;
+};
+
+enum{
+        VIRTIO_IB_EVENT_READ,
+        VIRTIO_IB_EVENT_POLL,
+        VIRTIO_IB_EVENT_CLOSE
 };
 
 #endif

@@ -1,7 +1,10 @@
 #include "virtio-ib.h"
 #include "qemu-error.h"
+#include "cpu.h"
 
-#define DEBUG 0
+#include <poll.h>
+
+#define DEBUG 1
 
 typedef struct VirtIOIB
 {
@@ -9,10 +12,9 @@ typedef struct VirtIOIB
     VirtQueue *write_vq;
     VirtQueue *read_vq;
     VirtQueue *device_vq;
-    struct {
-        VirtQueueElement elem;
-        ssize_t len;
-    } request;
+    VirtQueue *event_vq;
+    VirtQueue *event_poll_vq;
+
     struct ibv_sysfs_dev *sysfs_dev_list;
     DeviceState *qdev;
     int status;
@@ -21,9 +23,10 @@ typedef struct VirtIOIB
 
 struct ibv_sysfs_dev *sysfs_list;
 
-struct virtio_ib_config
-{
-    int config;
+struct VirtQueueFdHandlerData{
+    VirtIODevice *vdev;
+    VirtQueue *vq;
+    VirtQueueElement elem;
 };
 
 static VirtIOIB *to_virtio_ib(VirtIODevice *vdev)
@@ -33,33 +36,16 @@ static VirtIOIB *to_virtio_ib(VirtIODevice *vdev)
 
 static void virtio_ib_get_config(VirtIODevice *vdev, uint8_t *config)
 {
-    VirtIOIB *ib = to_virtio_ib(vdev);
-    struct virtio_ib_config cfg;
-
-    stw_p(&cfg.config, ib->status);
-    memcpy((void*) config, &cfg.config, sizeof(cfg));
-
-    #if DEBUG
-        printf("virtio_ib_get_config\n");
-    #endif
 }
 
 static void virtio_ib_set_config(VirtIODevice *vdev, const uint8_t *config)
 {
-    /*VirtIOIB *ib = to_virtio_ib(vdev);
-    struct virtio_ib_config cfg;*/
-    #if DEBUG
-        printf("virtio_ib_set_config\n");
-    #endif
 }
 
 static void virtio_ib_save(QEMUFile *f, void *opaque)
 {
     VirtIOIB *ib = opaque;
     virtio_save(&ib->vdev, f);
-    #if DEBUG
-        printf("virtio_ib_save\n");
-    #endif
 }
 
 static int virtio_ib_load(QEMUFile *f, void *opaque, int version_id)
@@ -67,58 +53,25 @@ static int virtio_ib_load(QEMUFile *f, void *opaque, int version_id)
     VirtIOIB *ib = opaque;
     virtio_load(&ib->vdev, f);
 
-    #if DEBUG
-        printf("virtio_ib_load\n");
-    #endif
     return 0;
 }
 
 static uint32_t virtio_ib_get_features(VirtIODevice *vdev, uint32_t features)
 {
-    //VirtIOIB *ib = to_virtio_ib(vdev);
-    
-    #if DEBUG
-        printf("virtio_ib_get_features\n");
-    #endif
-    return features;
-}
-
-static uint32_t virtio_ib_bad_features(VirtIODevice *vdev)
-{
-    uint32_t features = 0;
-    #if DEBUG
-        printf("virtio_ib_bad_features\n");
-    #endif
-    return features;
-}
-
-static void virtio_ib_set_features(VirtIODevice *vdev, uint32_t features)
-{
-    //VirtIOIB *ib = to_virtio_ib(vdev);
-    #if DEBUG
-        printf("virtio_ib_set_features\n");
-    #endif
+    return 0;
 }
 
 static void virtio_ib_reset(VirtIODevice *vdev)
 {
-    VirtIOIB *ib = to_virtio_ib(vdev);
+    VirtIOIB *ib = DO_UPCAST(VirtIOIB, vdev, vdev);
     int i;
 
     for (i = 0; i < 32768; i++)
         ib->pid2fd[i] = -1;
-
-    #if DEBUG
-        printf("virtio_ib_reset\n");
-    #endif
 }
 
 static void virtio_ib_set_status(struct VirtIODevice *vdev, uint8_t status)
 {
-    //VirtIOIB *ib = to_virtio_ib(vdev);
-    #if DEBUG
-        printf("virtio_ib_set_status\n");
-    #endif
 }
 
 static void virtio_ib_handle_write(VirtIODevice *vdev, VirtQueue *vq)
@@ -135,17 +88,13 @@ static void virtio_ib_handle_write(VirtIODevice *vdev, VirtQueue *vq)
     int i;
 
     while(virtqueue_pop(vq, &elem)){
+        cmd_size = elem.out_sg[0].iov_len;
+        cmd = (char*) elem.out_sg[0].iov_base;
+        memcpy(&hdr, cmd, sizeof(hdr));
 
-        INIT_VIB_ELEM;
-
-        if(!memcmp(&vib->request.elem, &elem, sizeof(elem)))
-            error_report("virtio-ib can not get read request\n");
-
-        GET_CMD_AND_HDR(&hdr, elem, cmd, cmd_size, sizeof(hdr));
-
-        #if DEBUG
-            printf("[virtio_ib_handle_write] cmd:%d\n", hdr.command);
-        #endif
+#if DEBUG
+        printf("[virtio_ib_handle_write] cmd:%d\n", hdr.command);
+#endif
 
         /*Get opening device fd*/
         if(hdr.command > 1 && hdr.command < 45)
@@ -174,7 +123,7 @@ static void virtio_ib_handle_write(VirtIODevice *vdev, VirtQueue *vq)
             case IB_USER_VERBS_CMD_MODIFY_SRQ:
                 ret_len = sizeof(int);
                 break;
-            case IB_USER_VERBS_CMD_CREATE_AH: 
+            case IB_USER_VERBS_CMD_CREATE_AH:
                 CHANGE_RESP_ADDR(struct ibv_create_ah, cmd, elem.in_sg[1]);
                 break;
             case IB_USER_VERBS_CMD_REG_MR:
@@ -223,10 +172,6 @@ static void virtio_ib_handle_write(VirtIODevice *vdev, VirtQueue *vq)
                 memcpy(&addr, elem.out_sg[1].iov_base, sizeof(void*));
                 munmap((void *) addr, *((int*)(elem.out_sg[2].iov_base)));
                 break;
-            case IB_USER_VERBS_CMD_GET_EVENT:
-                memcpy(&fd, elem.out_sg[1].iov_base, sizeof(fd));
-                ret_len = ((struct vib_cmd*)cmd)->out_words*4;
-                resp = read(fd, elem.in_sg[1].iov_base, ret_len);
             default:
                 error_report("virtio-ib wrong write command\n");
                 break;
@@ -247,21 +192,15 @@ static void virtio_ib_handle_write(VirtIODevice *vdev, VirtQueue *vq)
 
 static void virtio_ib_handle_read(VirtIODevice *vdev, VirtQueue *vq)
 {
-    VirtIOIB *vib = to_virtio_ib(vdev);
     VirtQueueElement elem;
 
     int ret_len = 0;
     int fd;
 
     while(virtqueue_pop(vq, &elem)){
-        INIT_VIB_ELEM;
-
-        if(!memcmp(&vib->request.elem, &elem, sizeof(elem)))
-            error_report("virtio-ib can not get write request\n");
-
-        #if DEBUG
-            printf("read path:%s\n", (char*) elem.out_sg[0].iov_base);
-        #endif
+#if DEBUG
+        printf("read path:%s\n", (char*) elem.out_sg[0].iov_base);
+#endif
 
         fd = open((char*)elem.out_sg[0].iov_base, O_RDONLY);
 
@@ -272,9 +211,9 @@ static void virtio_ib_handle_read(VirtIODevice *vdev, VirtQueue *vq)
 
         ret_len = read(fd, elem.in_sg[0].iov_base, elem.in_sg[0].iov_len);
 
-        #if DEBUG
-            printf("%s, %d\n", (char*) elem.in_sg[0].iov_base, ret_len);
-        #endif
+#if DEBUG
+        printf("%s, %d\n", (char*) elem.in_sg[0].iov_base, ret_len);
+#endif
 
         close(fd);
 
@@ -282,19 +221,18 @@ static void virtio_ib_handle_read(VirtIODevice *vdev, VirtQueue *vq)
         virtqueue_push(vq, &elem, ret_len);
     }
     virtio_notify(vdev, vq);
-    
+
     return;
 }
 
 static int get_sysfs_devs(struct ibv_sysfs_dev *sysfs_dev_list, struct ibv_sysfs_dev *sysfs)
 {
     struct ibv_sysfs_dev *sysfs_dev = NULL;
-    int i = 0;    
-    int j = 0;
+    int i = 0, j = 0;
 
-    #if DEBUG
-        printf("get_sysfs_devs\n");
-    #endif
+#if DEBUG
+    printf("get_sysfs_devs\n");
+#endif
 
     for(sysfs_dev = sysfs_dev_list; sysfs_dev; sysfs_dev = sysfs_dev->next){
         memcpy(&sysfs[i], sysfs_dev, sizeof(struct ibv_sysfs_dev));
@@ -327,23 +265,16 @@ static void virtio_ib_handle_device(VirtIODevice *vdev, VirtQueue *vq)
     unsigned long *addr1, *addr2;
 
     while(virtqueue_pop(vq, &elem)){
-
-        INIT_VIB_ELEM;
-
-        if (!memcmp(&elem, &vib->request.elem, sizeof(elem))) {
-            error_report("virtio-ib can not get device request\n");
-        }
-
         memcpy(&hdr, elem.out_sg[0].iov_base, sizeof(hdr));
 
-        #if DEBUG
-            printf("[virtio_ib_handle_device] cmd:%d\n", hdr.command);
-        #endif
+#if DEBUG
+        printf("[virtio_ib_handle_device] cmd:%d\n", hdr.command);
+#endif
 
         switch(hdr.command){
             case IB_USER_VERBS_CMD_FIND_SYSFS:
                 resp = get_sysfs_devs(vib->sysfs_dev_list, elem.in_sg[1].iov_base);
-                ret_len = 10*sizeof(struct ibv_sysfs_dev); 
+                ret_len = 10*sizeof(struct ibv_sysfs_dev);
                 elem.in_sg[1].iov_len = ret_len;
                 break;
             case IB_USER_VERBS_CMD_OPEN_DEV:
@@ -357,7 +288,7 @@ static void virtio_ib_handle_device(VirtIODevice *vdev, VirtQueue *vq)
                 memcpy(&fd, elem.out_sg[1].iov_base, sizeof(fd));
                 close(fd);
                 resp = 0;
-                ret_len = sizeof(int); 
+                ret_len = sizeof(int);
                 break;
             case IB_USER_VERBS_CMD_RING_DOORBELL:
                 memcpy(&addr, elem.out_sg[1].iov_base, sizeof(void*));
@@ -366,7 +297,7 @@ static void virtio_ib_handle_device(VirtIODevice *vdev, VirtQueue *vq)
                     case 1:
                         *(uint32_t *) ((void*)addr) = *(uint32_t *) elem.out_sg[2].iov_base;
                         break;
-                     case 2:/*FIX*/
+                    case 2:/*FIX*/
                         *(volatile uint64_t *) ((void*)addr) = *(uint64_t*) elem.out_sg[2].iov_base;
                         break;
                     case 3:
@@ -390,7 +321,7 @@ static void virtio_ib_handle_device(VirtIODevice *vdev, VirtQueue *vq)
                 break;
             default:
                 error_report("virtio-ib wrong command for device\n");
-                break; 
+                break;
         }
 
         memcpy(elem.in_sg[0].iov_base, &resp, sizeof(int));
@@ -402,79 +333,134 @@ static void virtio_ib_handle_device(VirtIODevice *vdev, VirtQueue *vq)
     return;
 }
 
+static void virtio_ib_event_poll(void *opaque)
+{
+    struct VirtQueueFdHandlerData *t = opaque;
+    int fd, cmd;
+    ssize_t len, ret;
+
+    fd = ldl_p(t->elem.out_sg[0].iov_base);
+    cmd = (__s32) ldl_p(t->elem.out_sg[1].iov_base);
+
+    switch(cmd){
+        case VIRTIO_IB_EVENT_READ:
+            len = (__u32) ldl_p(t->elem.out_sg[2].iov_base);
+            ret = read(fd, t->elem.in_sg[1].iov_base, len);
+            stl_p(t->elem.in_sg[0].iov_base, ret);
+            virtqueue_push(t->vq, &t->elem, sizeof(ret) + ret);
+            break;
+        case VIRTIO_IB_EVENT_POLL:
+            stl_p(t->elem.in_sg[0].iov_base, POLLIN | POLLRDNORM);
+            virtqueue_push(t->vq, &t->elem, sizeof(unsigned int));
+            break;
+    }
+    virtio_notify(t->vdev, t->vq);
+    g_free(t);
+    qemu_set_fd_handler(fd, NULL, NULL, NULL);
+}
+
+static void virtio_ib_handle_event(VirtIODevice *vdev, VirtQueue *vq)
+{
+    VirtQueueElement elem;
+    int fd;
+    __s32 cmd;
+    struct VirtQueueFdHandlerData *t;
+
+    while (virtqueue_pop(vq, &elem)) {
+        fd = ldl_p(elem.out_sg[0].iov_base);
+        cmd = ldl_p(elem.out_sg[1].iov_base);
+        switch(cmd){
+            case VIRTIO_IB_EVENT_READ:
+            case VIRTIO_IB_EVENT_POLL:
+                t = g_malloc0(sizeof *t);
+                t->vdev = vdev;
+                t->vq = vq;
+                memcpy(&t->elem, &elem, sizeof elem);
+                qemu_set_fd_handler(fd, virtio_ib_event_poll, NULL, (void *) t);
+                break;
+            case VIRTIO_IB_EVENT_CLOSE:
+                qemu_set_fd_handler(fd, NULL, NULL, NULL);
+                close(fd);
+                virtqueue_push(vq, &elem, 0);
+                virtio_notify(vdev, vq);
+                break;
+        }
+    }
+}
+
 static int find_sysfs_devs(void)
 {
-        char class_path[IBV_SYSFS_PATH_MAX];
-        DIR *class_dir;
-        struct dirent *dent;
-        struct ibv_sysfs_dev *sysfs_dev = NULL;
-        char value[8];
-        int ret = 0;
+    char class_path[IBV_SYSFS_PATH_MAX];
+    DIR *class_dir;
+    struct dirent *dent;
+    struct ibv_sysfs_dev *sysfs_dev = NULL;
+    char value[8];
+    int ret = 0;
 
-        snprintf(class_path, sizeof class_path, "/sys/class/infiniband_verbs");
+    snprintf(class_path, sizeof class_path, "/sys/class/infiniband_verbs");
 
-        class_dir = opendir(class_path);
-        if (!class_dir)
-                return ENOMEM;
+    class_dir = opendir(class_path);
+    if (!class_dir)
+        return ENOMEM;
 
-        while ((dent = readdir(class_dir))) {
-                struct stat buf;
+    while ((dent = readdir(class_dir))) {
+        struct stat buf;
 
-                if (dent->d_name[0] == '.')
-                        continue;
+        if (dent->d_name[0] == '.')
+            continue;
 
-                if (!sysfs_dev)
-                        sysfs_dev = malloc(sizeof *sysfs_dev);
-                if (!sysfs_dev) {
-                        ret = ENOMEM;
-                        goto out;
-                }
-
-                snprintf(sysfs_dev->sysfs_path, sizeof sysfs_dev->sysfs_path,
-                         "%s/%s", class_path, dent->d_name);
-
-                if (stat(sysfs_dev->sysfs_path, &buf)) {
-                        fprintf(stderr, "MLX4 Warning: couldn't stat '%s'.\n",
-                                sysfs_dev->sysfs_path);
-                        continue;
-                }
-
-                if (!S_ISDIR(buf.st_mode))
-                        continue;
-
-                snprintf(sysfs_dev->sysfs_name, sizeof sysfs_dev->sysfs_name,
-                        "%s", dent->d_name);
-
-                if (ibv_read_sysfs_file(sysfs_dev->sysfs_path, "ibdev",
-                                        sysfs_dev->ibdev_name,
-                                        sizeof sysfs_dev->ibdev_name) < 0) {
-                        fprintf(stderr, "MLX4 Warning: no ibdev class attr for '%s'.\n",
-                                dent->d_name);
-                        continue;
-                }
-
-                snprintf(sysfs_dev->ibdev_path, sizeof sysfs_dev->ibdev_path,
-                         "%s/class/infiniband/%s", ibv_get_sysfs_path(),
-                         sysfs_dev->ibdev_name);
-
-                sysfs_dev->next        = sysfs_list;
-                sysfs_dev->have_driver = 0;
-                if (ibv_read_sysfs_file(sysfs_dev->sysfs_path, "abi_version",
-                                        value, sizeof value) > 0)
-                        sysfs_dev->abi_ver = strtol(value, NULL, 10);
-                else
-                        sysfs_dev->abi_ver = 0;
-
-                sysfs_list = sysfs_dev;
-                sysfs_dev      = NULL;
+        if (!sysfs_dev)
+            sysfs_dev = malloc(sizeof *sysfs_dev);
+        if (!sysfs_dev) {
+            ret = ENOMEM;
+            goto out;
         }
 
- out:
-        if (sysfs_dev)
-                free(sysfs_dev);
+        snprintf(sysfs_dev->sysfs_path, sizeof sysfs_dev->sysfs_path,
+                "%s/%s", class_path, dent->d_name);
 
-        closedir(class_dir);
-        return ret;
+        if (stat(sysfs_dev->sysfs_path, &buf)) {
+            fprintf(stderr, "MLX4 Warning: couldn't stat '%s'.\n",
+                    sysfs_dev->sysfs_path);
+            continue;
+        }
+
+        if (!S_ISDIR(buf.st_mode))
+            continue;
+
+        snprintf(sysfs_dev->sysfs_name, sizeof sysfs_dev->sysfs_name,
+                "%s", dent->d_name);
+
+        if (ibv_read_sysfs_file(sysfs_dev->sysfs_path, "ibdev",
+                    sysfs_dev->ibdev_name,
+                    sizeof sysfs_dev->ibdev_name) < 0) {
+            fprintf(stderr, "MLX4 Warning: no ibdev class attr for '%s'.\n",
+                    dent->d_name);
+            continue;
+        }
+
+        snprintf(sysfs_dev->ibdev_path, sizeof sysfs_dev->ibdev_path,
+                "%s/class/infiniband/%s", ibv_get_sysfs_path(),
+                sysfs_dev->ibdev_name);
+
+        sysfs_dev->next        = sysfs_list;
+        sysfs_dev->have_driver = 0;
+        if (ibv_read_sysfs_file(sysfs_dev->sysfs_path, "abi_version",
+                    value, sizeof value) > 0)
+            sysfs_dev->abi_ver = strtol(value, NULL, 10);
+        else
+            sysfs_dev->abi_ver = 0;
+
+        sysfs_list = sysfs_dev;
+        sysfs_dev      = NULL;
+    }
+
+out:
+    if (sysfs_dev)
+        free(sysfs_dev);
+
+    closedir(class_dir);
+    return ret;
 }
 
 
@@ -483,23 +469,23 @@ VirtIODevice *virtio_ib_init(DeviceState *dev)
     VirtIOIB *ib;
     int i;
 
-    #if DEBUG
-        printf("virtio_ib_init\n");
-    #endif
+#if DEBUG
+    printf("virtio_ib_init\n");
+#endif
 
-    ib = (VirtIOIB *)virtio_common_init("virtio-ib", VIRTIO_ID_IB,
-                                          sizeof(struct virtio_ib_config),
-                                          sizeof(VirtIOIB));
+    ib = (VirtIOIB *)virtio_common_init("virtio-ib",
+            VIRTIO_ID_IB,
+            0, sizeof(VirtIOIB));
+
     ib->vdev.get_config = virtio_ib_get_config;
     ib->vdev.set_config = virtio_ib_set_config;
     ib->vdev.get_features = virtio_ib_get_features;
-    ib->vdev.set_features = virtio_ib_set_features;
-    ib->vdev.bad_features = virtio_ib_bad_features;
     ib->vdev.reset = virtio_ib_reset;
     ib->vdev.set_status = virtio_ib_set_status;
     ib->write_vq = virtio_add_queue(&ib->vdev, 1024, virtio_ib_handle_write);
     ib->read_vq = virtio_add_queue(&ib->vdev, 1024, virtio_ib_handle_read);
     ib->device_vq = virtio_add_queue(&ib->vdev, 1024, virtio_ib_handle_device);
+    ib->event_vq = virtio_add_queue(&ib->vdev, 1024, virtio_ib_handle_event);
 
     ib->qdev = dev;
     ib->status = 99;
@@ -513,13 +499,13 @@ VirtIODevice *virtio_ib_init(DeviceState *dev)
         ib->pid2fd[i] = -1;
 
     register_savevm(dev, "virtio-ib", 0, 2,
-                    virtio_ib_save, virtio_ib_load, ib);
+            virtio_ib_save, virtio_ib_load, ib);
 
     return &ib->vdev;
 }
 
 void virtio_ib_exit(VirtIODevice *vdev)
 {
-    VirtIOIB *ib = to_virtio_ib(vdev);
+    VirtIOIB *ib = DO_UPCAST(VirtIOIB, vdev, vdev);
     unregister_savevm(ib->qdev, "virtio-ib", ib);
 }

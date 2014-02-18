@@ -11,7 +11,7 @@
 #include <sys/mman.h>
 #endif
 
-#define DEBUG 1
+#define DEBUG 0
 
 #define MEMLINK_UNUSED 0
 #define MEMLINK_USED 1
