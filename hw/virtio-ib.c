@@ -305,12 +305,10 @@ static unsigned int virtib_device_mmap(VirtQueueElement *elem){
     uint64_t resp;
 
     host_addr = get_host_ram_addr(addr);
+    munmap(host_addr, length);
     resp = (uint64_t) mmap(host_addr, length, PROT_WRITE, MAP_FIXED | MAP_SHARED, fd, offset);
-    if ((void *) resp == (void *) -1){
+    if ((void *) resp == (void *) -1)
         perror("virtio-ib: mmap failed");
-    } else {
-        resp = addr;
-    }
     stq_p(elem->in_sg[0].iov_base, resp);
     return sizeof(resp);
 }
@@ -330,6 +328,7 @@ static unsigned int virtib_device_munmap(VirtQueueElement *elem){
 
     host_addr = get_host_ram_addr(addr);
     resp = (int32_t) munmap(host_addr, length);
+    mmap(host_addr, length, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_FIXED | MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     stq_p(elem->in_sg[0].iov_base, resp);
     return 0;
 }
