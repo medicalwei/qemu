@@ -1,10 +1,22 @@
-#include "virtio-ib.h"
-#include "qemu-error.h"
+#include "iov.h"
+#include "qemu-common.h"
+#include "virtio.h"
 #include "cpu.h"
+#include "memory.h"
+#include "exec-memory.h"
+#include "virtio-ib.h"
 
 #include <poll.h>
+#include <sys/mman.h>
+#include <dirent.h>
+#include <infiniband/verbs.h>
+#include <infiniband/driver.h>
 
 #define DEBUG 1
+
+#define IB_UVERBS_CMD_MAX_SIZE 16384
+#define VIRTIB_MAX_SYSFS_DEVS 10
+#define VIRTIB_UVERBS_DEV_PATH "/dev/infiniband/uverbs0"
 
 typedef struct VirtIOIB
 {
@@ -15,11 +27,19 @@ typedef struct VirtIOIB
     VirtQueue *event_vq;
     VirtQueue *event_poll_vq;
 
-    struct ibv_sysfs_dev *sysfs_dev_list;
     DeviceState *qdev;
     int status;
-    int pid2fd[32768];
 } VirtIOIB;
+
+struct ibv_sysfs_dev {
+    char                  sysfs_name[IBV_SYSFS_NAME_MAX];
+    char                  ibdev_name[IBV_SYSFS_NAME_MAX];
+    char                  sysfs_path[IBV_SYSFS_PATH_MAX];
+    char                  ibdev_path[IBV_SYSFS_PATH_MAX];
+    struct ibv_sysfs_dev *next;
+    int                   abi_ver;
+    int                   have_driver;
+};
 
 struct ibv_sysfs_dev *sysfs_list;
 
@@ -29,26 +49,31 @@ struct VirtQueueFdHandlerData{
     VirtQueueElement elem;
 };
 
-static VirtIOIB *to_virtio_ib(VirtIODevice *vdev)
-{
-    return (VirtIOIB *)vdev;
+static void *get_host_ram_addr(ram_addr_t addr){
+    MemoryRegionSection section;
+
+    printf("get_host_ram_addr %p\n", (void *) addr);
+    addr = TARGET_PAGE_ALIGN(addr);
+    section = memory_region_find(get_system_memory(), addr, 1);
+    assert(memory_region_is_ram(section.mr));
+    return memory_region_get_ram_ptr(section.mr) + section.offset_within_region;
 }
 
-static void virtio_ib_get_config(VirtIODevice *vdev, uint8_t *config)
+static void virtib_get_config(VirtIODevice *vdev, uint8_t *config)
 {
 }
 
-static void virtio_ib_set_config(VirtIODevice *vdev, const uint8_t *config)
+static void virtib_set_config(VirtIODevice *vdev, const uint8_t *config)
 {
 }
 
-static void virtio_ib_save(QEMUFile *f, void *opaque)
+static void virtib_save(QEMUFile *f, void *opaque)
 {
     VirtIOIB *ib = opaque;
     virtio_save(&ib->vdev, f);
 }
 
-static int virtio_ib_load(QEMUFile *f, void *opaque, int version_id)
+static int virtib_load(QEMUFile *f, void *opaque, int version_id)
 {
     VirtIOIB *ib = opaque;
     virtio_load(&ib->vdev, f);
@@ -56,141 +81,117 @@ static int virtio_ib_load(QEMUFile *f, void *opaque, int version_id)
     return 0;
 }
 
-static uint32_t virtio_ib_get_features(VirtIODevice *vdev, uint32_t features)
+static uint32_t virtib_get_features(VirtIODevice *vdev, uint32_t features)
 {
     return 0;
 }
 
-static void virtio_ib_reset(VirtIODevice *vdev)
-{
-    VirtIOIB *ib = DO_UPCAST(VirtIOIB, vdev, vdev);
-    int i;
-
-    for (i = 0; i < 32768; i++)
-        ib->pid2fd[i] = -1;
-}
-
-static void virtio_ib_set_status(struct VirtIODevice *vdev, uint8_t status)
+static void virtib_reset(VirtIODevice *vdev)
 {
 }
 
-static void virtio_ib_handle_write(VirtIODevice *vdev, VirtQueue *vq)
+static void virtib_set_status(struct VirtIODevice *vdev, uint8_t status)
 {
-    VirtIOIB *vib = to_virtio_ib(vdev);
+}
+
+const char *virtib_cmd_name[] = {
+#define VIRTIB_EACH_CMD_NAME(__cmd) [__cmd] = #__cmd
+
+    VIRTIB_EACH_CMD_NAME(IB_USER_VERBS_CMD_GET_CONTEXT),
+    VIRTIB_EACH_CMD_NAME(IB_USER_VERBS_CMD_QUERY_DEVICE),
+    VIRTIB_EACH_CMD_NAME(IB_USER_VERBS_CMD_QUERY_PORT),
+    VIRTIB_EACH_CMD_NAME(IB_USER_VERBS_CMD_ALLOC_PD),
+    VIRTIB_EACH_CMD_NAME(IB_USER_VERBS_CMD_DEALLOC_PD),
+    VIRTIB_EACH_CMD_NAME(IB_USER_VERBS_CMD_CREATE_AH),
+    VIRTIB_EACH_CMD_NAME(IB_USER_VERBS_CMD_MODIFY_AH),
+    VIRTIB_EACH_CMD_NAME(IB_USER_VERBS_CMD_QUERY_AH),
+    VIRTIB_EACH_CMD_NAME(IB_USER_VERBS_CMD_DESTROY_AH),
+    VIRTIB_EACH_CMD_NAME(IB_USER_VERBS_CMD_REG_MR),
+    VIRTIB_EACH_CMD_NAME(IB_USER_VERBS_CMD_REG_SMR),
+    VIRTIB_EACH_CMD_NAME(IB_USER_VERBS_CMD_REREG_MR),
+    VIRTIB_EACH_CMD_NAME(IB_USER_VERBS_CMD_QUERY_MR),
+    VIRTIB_EACH_CMD_NAME(IB_USER_VERBS_CMD_DEREG_MR),
+    VIRTIB_EACH_CMD_NAME(IB_USER_VERBS_CMD_ALLOC_MW),
+    VIRTIB_EACH_CMD_NAME(IB_USER_VERBS_CMD_BIND_MW),
+    VIRTIB_EACH_CMD_NAME(IB_USER_VERBS_CMD_DEALLOC_MW),
+    VIRTIB_EACH_CMD_NAME(IB_USER_VERBS_CMD_CREATE_COMP_CHANNEL),
+    VIRTIB_EACH_CMD_NAME(IB_USER_VERBS_CMD_CREATE_CQ),
+    VIRTIB_EACH_CMD_NAME(IB_USER_VERBS_CMD_RESIZE_CQ),
+    VIRTIB_EACH_CMD_NAME(IB_USER_VERBS_CMD_DESTROY_CQ),
+    VIRTIB_EACH_CMD_NAME(IB_USER_VERBS_CMD_POLL_CQ),
+    VIRTIB_EACH_CMD_NAME(IB_USER_VERBS_CMD_PEEK_CQ),
+    VIRTIB_EACH_CMD_NAME(IB_USER_VERBS_CMD_REQ_NOTIFY_CQ),
+    VIRTIB_EACH_CMD_NAME(IB_USER_VERBS_CMD_CREATE_QP),
+    VIRTIB_EACH_CMD_NAME(IB_USER_VERBS_CMD_QUERY_QP),
+    VIRTIB_EACH_CMD_NAME(IB_USER_VERBS_CMD_MODIFY_QP),
+    VIRTIB_EACH_CMD_NAME(IB_USER_VERBS_CMD_DESTROY_QP),
+    VIRTIB_EACH_CMD_NAME(IB_USER_VERBS_CMD_POST_SEND),
+    VIRTIB_EACH_CMD_NAME(IB_USER_VERBS_CMD_POST_RECV),
+    VIRTIB_EACH_CMD_NAME(IB_USER_VERBS_CMD_ATTACH_MCAST),
+    VIRTIB_EACH_CMD_NAME(IB_USER_VERBS_CMD_DETACH_MCAST),
+    VIRTIB_EACH_CMD_NAME(IB_USER_VERBS_CMD_CREATE_SRQ),
+    VIRTIB_EACH_CMD_NAME(IB_USER_VERBS_CMD_MODIFY_SRQ),
+    VIRTIB_EACH_CMD_NAME(IB_USER_VERBS_CMD_QUERY_SRQ),
+    VIRTIB_EACH_CMD_NAME(IB_USER_VERBS_CMD_DESTROY_SRQ),
+    VIRTIB_EACH_CMD_NAME(IB_USER_VERBS_CMD_POST_SRQ_RECV)
+};
+
+static void virtib_convert_addresses_to_host_virt(void *buf)
+{
+    struct ibv_query_params *hdr = buf;
+    if (hdr->command == IB_USER_VERBS_CMD_CREATE_CQ){
+        struct virtib_create_cq *cmd = buf;
+        cmd->buf_addr = (__u64) get_host_ram_addr(cmd->buf_addr);
+        cmd->db_addr = (__u64) get_host_ram_addr(cmd->db_addr);
+    } else if (hdr->command == IB_USER_VERBS_CMD_RESIZE_CQ){
+        struct virtib_resize_cq *cmd = buf;
+        cmd->buf_addr = (__u64) get_host_ram_addr(cmd->buf_addr);
+    } else if (hdr->command == IB_USER_VERBS_CMD_CREATE_SRQ){
+        struct virtib_create_srq *cmd = buf;
+        cmd->buf_addr = (__u64) get_host_ram_addr(cmd->buf_addr);
+        cmd->db_addr = (__u64) get_host_ram_addr(cmd->db_addr);
+    } else if (hdr->command == IB_USER_VERBS_CMD_CREATE_QP){
+        struct virtib_create_qp *cmd = buf;
+        cmd->buf_addr = (__u64) get_host_ram_addr(cmd->buf_addr);
+        cmd->db_addr = (__u64) get_host_ram_addr(cmd->db_addr);
+    }
+}
+
+static void virtib_handle_write(VirtIODevice *vdev, VirtQueue *vq)
+{
+    /* Element Segments
+     * out_sg[0] int32_t: fd
+     * out_sg[1] VAR_LEN: ibv command
+     *  in_sg[0] int32_t: write response
+     *  in_sg[1] VAR_LEN: data response
+     */
     VirtQueueElement elem;
-    struct vib_cmd_hdr hdr;
-    char *cmd;
-    void *addr;
-    int cmd_size = 0;
-    int ret_len = 0;
-    int resp;
-    int fd = 0;
-    int i;
 
     while(virtqueue_pop(vq, &elem)){
-        cmd_size = elem.out_sg[0].iov_len;
-        cmd = (char*) elem.out_sg[0].iov_base;
-        memcpy(&hdr, cmd, sizeof(hdr));
+        int fd, resp;
+        char in[IB_UVERBS_CMD_MAX_SIZE];
+        struct ibv_query_params *hdr = (void *) in;
 
-#if DEBUG
-        printf("[virtio_ib_handle_write] cmd:%d\n", hdr.command);
-#endif
+        fd = ldl_p(elem.out_sg[0].iov_base);
+        memcpy(in, elem.out_sg[1].iov_base, elem.out_sg[1].iov_len);
 
-        /*Get opening device fd*/
-        if(hdr.command > 1 && hdr.command < 45)
-            memcpy(&fd, elem.out_sg[1].iov_base, sizeof(int));
-
-        switch(hdr.command){
-            case IB_USER_VERBS_CMD_GET_CONTEXT:
-            case IB_USER_VERBS_CMD_QUERY_DEVICE:
-                GET_INDEX(elem.out_sg[1].iov_base);
-                fd = vib->pid2fd[i];
-                CHANGE_RESP_ADDR(struct ibv_get_context, cmd, elem.in_sg[1]);
-                break;
-            case IB_USER_VERBS_CMD_QUERY_PORT:
-                CHANGE_RESP_ADDR(struct ibv_query_port, cmd, elem.in_sg[1]);
-                break;
-            case IB_USER_VERBS_CMD_ALLOC_PD:
-                CHANGE_RESP_ADDR(struct ibv_alloc_pd, cmd, elem.in_sg[1]);
-                break;
-            case IB_USER_VERBS_CMD_DEALLOC_PD:
-            case IB_USER_VERBS_CMD_DESTROY_AH:
-            case IB_USER_VERBS_CMD_DEREG_MR:
-            case IB_USER_VERBS_CMD_REQ_NOTIFY_CQ:
-            case IB_USER_VERBS_CMD_MODIFY_QP:
-            case IB_USER_VERBS_CMD_ATTACH_MCAST:
-            case IB_USER_VERBS_CMD_DETACH_MCAST:
-            case IB_USER_VERBS_CMD_MODIFY_SRQ:
-                ret_len = sizeof(int);
-                break;
-            case IB_USER_VERBS_CMD_CREATE_AH:
-                CHANGE_RESP_ADDR(struct ibv_create_ah, cmd, elem.in_sg[1]);
-                break;
-            case IB_USER_VERBS_CMD_REG_MR:
-                CHANGE_RESP_ADDR(struct ibv_reg_mr, cmd, elem.in_sg[1]);
-                break;
-            case IB_USER_VERBS_CMD_CREATE_COMP_CHANNEL:
-                CHANGE_RESP_ADDR(struct ibv_create_comp_channel, cmd, elem.in_sg[1]);
-                break;
-            case IB_USER_VERBS_CMD_CREATE_CQ:
-                CHANGE_RESP_ADDR(struct ibv_create_cq, cmd, elem.in_sg[1]);
-                break;
-            case IB_USER_VERBS_CMD_RESIZE_CQ:
-                CHANGE_RESP_ADDR(struct ibv_resize_cq, cmd, elem.in_sg[1]);
-                break;
-            case IB_USER_VERBS_CMD_DESTROY_CQ:
-                CHANGE_RESP_ADDR(struct ibv_destroy_cq, cmd, elem.in_sg[1]);
-                break;
-            case IB_USER_VERBS_CMD_CREATE_QP:
-                CHANGE_RESP_ADDR(struct ibv_create_qp, cmd, elem.in_sg[1]);
-                break;
-            case IB_USER_VERBS_CMD_QUERY_QP:
-                CHANGE_RESP_ADDR(struct ibv_query_qp, cmd, elem.in_sg[1]);
-                break;
-            case IB_USER_VERBS_CMD_DESTROY_QP:
-                CHANGE_RESP_ADDR(struct ibv_destroy_qp, cmd, elem.in_sg[1]);
-                break;
-            case IB_USER_VERBS_CMD_CREATE_SRQ:
-                CHANGE_RESP_ADDR(struct ibv_create_srq, cmd, elem.in_sg[1]);
-                break;
-            case IB_USER_VERBS_CMD_QUERY_SRQ:
-                CHANGE_RESP_ADDR(struct ibv_query_srq, cmd, elem.in_sg[1]);
-                break;
-            case IB_USER_VERBS_CMD_DESTROY_SRQ:
-                CHANGE_RESP_ADDR(struct ibv_destroy_srq, cmd, elem.in_sg[1]);
-                break;
-            case IB_USER_VERBS_CMD_MMAP:
-                GET_INDEX(elem.out_sg[1].iov_base);
-                fd = vib->pid2fd[i];
-                addr = mmap(NULL, ((struct vib_mmap*)cmd)->page_size, ((struct vib_mmap*)cmd)->prot, ((struct vib_mmap*)cmd)->flags, fd, ((struct vib_mmap*)cmd)->off);
-                resp = sizeof(struct vib_mmap);
-                memcpy(elem.in_sg[0].iov_base, &resp, sizeof(int));
-                memcpy(elem.in_sg[1].iov_base, &addr, sizeof(void*));
-                ret_len = sizeof(void*);
-                break;
-            case IB_USER_VERBS_CMD_UNMAP:
-                memcpy(&addr, elem.out_sg[1].iov_base, sizeof(void*));
-                munmap((void *) addr, *((int*)(elem.out_sg[2].iov_base)));
-                break;
-            default:
-                error_report("virtio-ib wrong write command\n");
-                break;
+        if (hdr->out_words > 0){
+            hdr->response = (__u64) elem.in_sg[1].iov_base;
         }
 
-        if (hdr.command < 45){
-            resp = write(fd, cmd, cmd_size);
-            memcpy(elem.in_sg[0].iov_base, &resp, sizeof(resp));
-            if(!ret_len)
-                ret_len = hdr.out_words * 4;
-        }
+        virtib_convert_addresses_to_host_virt(in);
 
-        elem.in_sg[0].iov_len = sizeof(int);
-        virtqueue_push(vq, &elem, ret_len);
+        if (DEBUG)
+            printf("DEBUG: write cmd: %s, fd: %d\n", virtib_cmd_name[hdr->command], fd);
+
+        resp = write(fd, in, elem.out_sg[1].iov_len);
+        stl_p(elem.in_sg[0].iov_base, resp);
+        virtqueue_push(vq, &elem, sizeof(int) + IB_UVERBS_CMD_MAX_SIZE);
     }
     virtio_notify(vdev, vq);
 }
 
-static void virtio_ib_handle_read(VirtIODevice *vdev, VirtQueue *vq)
+static void virtib_handle_read(VirtIODevice *vdev, VirtQueue *vq)
 {
     VirtQueueElement elem;
 
@@ -205,7 +206,7 @@ static void virtio_ib_handle_read(VirtIODevice *vdev, VirtQueue *vq)
         fd = open((char*)elem.out_sg[0].iov_base, O_RDONLY);
 
         if(fd < 0){
-            error_report("virtio-ib read driver system file failed\n");
+            error_report("virtio-ib: read driver system file failed\n");
             return;
         }
 
@@ -239,101 +240,123 @@ static int get_sysfs_devs(struct ibv_sysfs_dev *sysfs_dev_list, struct ibv_sysfs
         i++;
     }
 
-    for (j = i; j < 10; j++){
+    for (j = i; j < VIRTIB_MAX_SYSFS_DEVS; j++){
         sysfs[j].have_driver = -1;
     }
 
     if (i > 0)
         return 0;
     else{
-        error_report("virtio-ib no InfiniBand driver loaded\n");
+        error_report("virtio-ib: no InfiniBand driver loaded\n");
         return -1;
     }
 
 }
 
-static void virtio_ib_handle_device(VirtIODevice *vdev, VirtQueue *vq)
+static unsigned int virtib_device_find_sysfs(VirtQueueElement *elem){
+    /* Element Segments
+     * out_sg[0] __s32: VIRTIB_DEVICE_FIND_SYSFS
+     *  in_sg[0] __s32: get_sysfs_devs return value
+     *  in_sg[1] sizeof(struct ibv_sysfs_dev)*VIRTIB_MAX_SYSFS_DEVS:
+     *                  sysfs list
+     */
+    int resp = get_sysfs_devs(sysfs_list, elem->in_sg[1].iov_base);
+    stl_p(elem->in_sg[0].iov_base, resp);
+    return sizeof(resp) + VIRTIB_MAX_SYSFS_DEVS*sizeof(struct ibv_sysfs_dev);
+}
+
+static unsigned int virtib_device_open(VirtQueueElement *elem){
+    /* Element Segments
+     * out_sg[0] int32_t: VIRTIB_DEVICE_OPEN
+     *  in_sg[0] int32_t: fd opened
+     */
+    int fd = open(VIRTIB_UVERBS_DEV_PATH, O_RDWR);
+    stl_p(elem->in_sg[0].iov_base, fd);
+    return sizeof fd;
+}
+
+static unsigned int virtib_device_close(VirtQueueElement *elem){
+    /* Element Segments
+     * out_sg[0] int32_t: VIRTIB_DEVICE_CLOSE
+     * out_sg[1] int32_t: fd to be closed
+     *  in_sg[0] int32_t: close result
+     */
+    int fd = ldl_p(elem->out_sg[1].iov_base);
+    int resp = close(fd);
+    stl_p(elem->in_sg[0].iov_base, resp);
+    return sizeof(resp);
+}
+
+static unsigned int virtib_device_mmap(VirtQueueElement *elem){
+    /* Element Segments
+     * out_sg[0]  int32_t: VIRTIB_DEVICE_MMAP
+     * out_sg[1]  int32_t: fd
+     * out_sg[2] uint64_t: guest physical address to be mapped
+     * out_sg[3] uint64_t: length
+     * out_sg[4] uint64_t: offset
+     *  in_sg[0] uint64_t: mmap return value
+     */
+    int32_t    fd     = (int32_t)    ldl_p(elem->out_sg[1].iov_base);
+    ram_addr_t addr   = (ram_addr_t) ldq_p(elem->out_sg[2].iov_base);
+    size_t     length = (size_t)     ldq_p(elem->out_sg[3].iov_base);
+    off_t      offset = (off_t)      ldq_p(elem->out_sg[4].iov_base);
+
+    void *host_addr;
+    uint64_t resp;
+
+    host_addr = get_host_ram_addr(addr);
+    resp = (uint64_t) mmap(host_addr, length, PROT_WRITE, MAP_FIXED | MAP_SHARED, fd, offset);
+    if ((void *) resp == (void *) -1){
+        perror("virtio-ib: mmap failed");
+    } else {
+        resp = addr;
+    }
+    stq_p(elem->in_sg[0].iov_base, resp);
+    return sizeof(resp);
+}
+
+static unsigned int virtib_device_munmap(VirtQueueElement *elem){
+    /* Element Segments
+     * out_sg[0]  int32_t: VIRTIB_DEVICE_MUNMAP
+     * out_sg[1] uint64_t: guest physical address to be unmapped
+     * out_sg[2] uint64_t: length
+     *  in_sg[0]  int32_t: munmap return value
+     */
+    ram_addr_t addr   = (ram_addr_t) ldq_p(elem->out_sg[1].iov_base);
+    size_t     length = (size_t)     ldq_p(elem->out_sg[2].iov_base);
+
+    void *host_addr;
+    int32_t resp;
+
+    host_addr = get_host_ram_addr(addr);
+    resp = (int32_t) munmap(host_addr, length);
+    stq_p(elem->in_sg[0].iov_base, resp);
+    return 0;
+}
+
+static unsigned int (*virtib_device_cmd_callbacks[]) (VirtQueueElement *) = {
+    [VIRTIB_DEVICE_FIND_SYSFS] = virtib_device_find_sysfs,
+    [VIRTIB_DEVICE_OPEN]       = virtib_device_open,
+    [VIRTIB_DEVICE_CLOSE]      = virtib_device_close,
+    [VIRTIB_DEVICE_MMAP]       = virtib_device_mmap,
+    [VIRTIB_DEVICE_MUNMAP]     = virtib_device_munmap
+};
+
+static void virtib_handle_device(VirtIODevice *vdev, VirtQueue *vq)
 {
-    VirtIOIB *vib = to_virtio_ib(vdev);
     VirtQueueElement elem;
-    struct vib_cmd_hdr hdr;
-    int resp = 0;
-    int ret_len = 0;
-    int i;
-    int fd;
-    void *addr;
-    unsigned long *addr1, *addr2;
 
     while(virtqueue_pop(vq, &elem)){
-        memcpy(&hdr, elem.out_sg[0].iov_base, sizeof(hdr));
-
-#if DEBUG
-        printf("[virtio_ib_handle_device] cmd:%d\n", hdr.command);
-#endif
-
-        switch(hdr.command){
-            case IB_USER_VERBS_CMD_FIND_SYSFS:
-                resp = get_sysfs_devs(vib->sysfs_dev_list, elem.in_sg[1].iov_base);
-                ret_len = 10*sizeof(struct ibv_sysfs_dev);
-                elem.in_sg[1].iov_len = ret_len;
-                break;
-            case IB_USER_VERBS_CMD_OPEN_DEV:
-                GET_INDEX(elem.out_sg[1].iov_base);
-                resp = open("/dev/infiniband/uverbs0", O_RDWR);
-                vib->pid2fd[i] = resp;
-                memcpy(elem.in_sg[0].iov_base, &resp, sizeof(resp));
-                ret_len = sizeof(int);
-                break;
-            case IB_USER_VERBS_CMD_CLOSE_DEV_FD:
-                memcpy(&fd, elem.out_sg[1].iov_base, sizeof(fd));
-                close(fd);
-                resp = 0;
-                ret_len = sizeof(int);
-                break;
-            case IB_USER_VERBS_CMD_RING_DOORBELL:
-                memcpy(&addr, elem.out_sg[1].iov_base, sizeof(void*));
-                memcpy(&i, elem.out_sg[3].iov_base, sizeof(int));
-                switch(i){
-                    case 1:
-                        *(uint32_t *) ((void*)addr) = *(uint32_t *) elem.out_sg[2].iov_base;
-                        break;
-                    case 2:/*FIX*/
-                        *(volatile uint64_t *) ((void*)addr) = *(uint64_t*) elem.out_sg[2].iov_base;
-                        break;
-                    case 3:
-                        *(volatile uint32_t *) ((void*)addr) = *(uint32_t *) elem.out_sg[2].iov_base;
-                        break;
-                    default:
-                        break;
-                }
-                break;
-            case IB_USER_VERBS_CMD_BUF_COPY:
-                i = (unsigned) elem.out_sg[1].iov_len;
-                memcpy(&addr, elem.out_sg[2].iov_base, sizeof(void*));
-                addr1 = (unsigned long *) addr;//dst
-                addr2 = (unsigned long *)(elem.out_sg[1].iov_base);//src
-                while (i > 0) {
-                    *addr1++ = *addr2++;
-                    *addr1++ = *addr2++;
-                    i -= 2 * sizeof (long);
-                }
-                ret_len = sizeof(int);
-                break;
-            default:
-                error_report("virtio-ib wrong command for device\n");
-                break;
-        }
-
-        memcpy(elem.in_sg[0].iov_base, &resp, sizeof(int));
-        elem.in_sg[0].iov_len = sizeof(int);
-        virtqueue_push(vq, &elem, ret_len);
+        int cmd = ldl_p(elem.out_sg[0].iov_base);
+        unsigned int cb_size = virtib_device_cmd_callbacks[cmd](&elem);
+        virtqueue_push(vq, &elem, cb_size);
     }
     virtio_notify(vdev, vq);
 
     return;
 }
 
-static void virtio_ib_event_poll(void *opaque)
+static void virtib_event_poll(void *opaque)
 {
     struct VirtQueueFdHandlerData *t = opaque;
     int fd, cmd;
@@ -343,13 +366,13 @@ static void virtio_ib_event_poll(void *opaque)
     cmd = (__s32) ldl_p(t->elem.out_sg[1].iov_base);
 
     switch(cmd){
-        case VIRTIO_IB_EVENT_READ:
+        case VIRTIB_EVENT_READ:
             len = (__u32) ldl_p(t->elem.out_sg[2].iov_base);
             ret = read(fd, t->elem.in_sg[1].iov_base, len);
             stl_p(t->elem.in_sg[0].iov_base, ret);
             virtqueue_push(t->vq, &t->elem, sizeof(ret) + ret);
             break;
-        case VIRTIO_IB_EVENT_POLL:
+        case VIRTIB_EVENT_POLL:
             stl_p(t->elem.in_sg[0].iov_base, POLLIN | POLLRDNORM);
             virtqueue_push(t->vq, &t->elem, sizeof(unsigned int));
             break;
@@ -359,7 +382,7 @@ static void virtio_ib_event_poll(void *opaque)
     qemu_set_fd_handler(fd, NULL, NULL, NULL);
 }
 
-static void virtio_ib_handle_event(VirtIODevice *vdev, VirtQueue *vq)
+static void virtib_handle_event(VirtIODevice *vdev, VirtQueue *vq)
 {
     VirtQueueElement elem;
     int fd;
@@ -370,15 +393,15 @@ static void virtio_ib_handle_event(VirtIODevice *vdev, VirtQueue *vq)
         fd = ldl_p(elem.out_sg[0].iov_base);
         cmd = ldl_p(elem.out_sg[1].iov_base);
         switch(cmd){
-            case VIRTIO_IB_EVENT_READ:
-            case VIRTIO_IB_EVENT_POLL:
+            case VIRTIB_EVENT_READ:
+            case VIRTIB_EVENT_POLL:
                 t = g_malloc0(sizeof *t);
                 t->vdev = vdev;
                 t->vq = vq;
                 memcpy(&t->elem, &elem, sizeof elem);
-                qemu_set_fd_handler(fd, virtio_ib_event_poll, NULL, (void *) t);
+                qemu_set_fd_handler(fd, virtib_event_poll, NULL, (void *) t);
                 break;
-            case VIRTIO_IB_EVENT_CLOSE:
+            case VIRTIB_EVENT_CLOSE:
                 qemu_set_fd_handler(fd, NULL, NULL, NULL);
                 close(fd);
                 virtqueue_push(vq, &elem, 0);
@@ -467,39 +490,29 @@ out:
 VirtIODevice *virtio_ib_init(DeviceState *dev)
 {
     VirtIOIB *ib;
-    int i;
-
-#if DEBUG
-    printf("virtio_ib_init\n");
-#endif
 
     ib = (VirtIOIB *)virtio_common_init("virtio-ib",
             VIRTIO_ID_IB,
             0, sizeof(VirtIOIB));
 
-    ib->vdev.get_config = virtio_ib_get_config;
-    ib->vdev.set_config = virtio_ib_set_config;
-    ib->vdev.get_features = virtio_ib_get_features;
-    ib->vdev.reset = virtio_ib_reset;
-    ib->vdev.set_status = virtio_ib_set_status;
-    ib->write_vq = virtio_add_queue(&ib->vdev, 1024, virtio_ib_handle_write);
-    ib->read_vq = virtio_add_queue(&ib->vdev, 1024, virtio_ib_handle_read);
-    ib->device_vq = virtio_add_queue(&ib->vdev, 1024, virtio_ib_handle_device);
-    ib->event_vq = virtio_add_queue(&ib->vdev, 1024, virtio_ib_handle_event);
+    ib->vdev.get_config = virtib_get_config;
+    ib->vdev.set_config = virtib_set_config;
+    ib->vdev.get_features = virtib_get_features;
+    ib->vdev.reset = virtib_reset;
+    ib->vdev.set_status = virtib_set_status;
+    ib->write_vq = virtio_add_queue(&ib->vdev, 1024, virtib_handle_write);
+    ib->read_vq = virtio_add_queue(&ib->vdev, 1024, virtib_handle_read);
+    ib->device_vq = virtio_add_queue(&ib->vdev, 1024, virtib_handle_device);
+    ib->event_vq = virtio_add_queue(&ib->vdev, 1024, virtib_handle_event);
 
     ib->qdev = dev;
     ib->status = 99;
 
     if (find_sysfs_devs())
-        error_report("virtio-ib Can't not find InfiniBand!\n");
-
-    ib->sysfs_dev_list = sysfs_list;
-
-    for (i = 0; i < 32768; i++)
-        ib->pid2fd[i] = -1;
+        error_report("virtio-ib: Can't not find InfiniBand!\n");
 
     register_savevm(dev, "virtio-ib", 0, 2,
-            virtio_ib_save, virtio_ib_load, ib);
+            virtib_save, virtib_load, ib);
 
     return &ib->vdev;
 }

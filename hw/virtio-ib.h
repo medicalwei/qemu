@@ -1,84 +1,47 @@
 #ifndef _QEMU_VIRTIO_IB_H
 #define _QEMU_VIRTIO_IB_H
 
-#include <qemu-common.h>
-#include "virtio.h"
-#include "qemu-error.h"
-#include "pci.h"
-
-#include <infiniband/verbs.h>
-#include <infiniband/arch.h>
-#include <infiniband/driver.h>
-#include "mlx4.h"
-
-#include "string.h"
-#include <sys/stat.h>
-#include <sys/types.h>
-#include <sys/time.h>
-#include <sys/resource.h>
-#include <dirent.h>
-
-#include <fcntl.h>
-#include <sys/mman.h>
-#include <linux/fb.h>
-
-#include <stdio.h>
-#include <stdlib.h>
-#include <unistd.h>
-#include <errno.h>
-#include <alloca.h>
-
+#include <infiniband/kern-abi.h>
 #define VIRTIO_ID_IB 99
 
-#define GET_INDEX(ptr) memcpy(&i, (ptr), sizeof(i));
-
-#define CHANGE_RESP_ADDR(type, command, data) ((type*)(command))->response = (uintptr_t) (data).iov_base;
-
-struct ibv_sysfs_dev {
-        char                    sysfs_name[IBV_SYSFS_NAME_MAX];
-        char                    ibdev_name[IBV_SYSFS_NAME_MAX];
-        char                    sysfs_path[IBV_SYSFS_PATH_MAX];
-        char                    ibdev_path[IBV_SYSFS_PATH_MAX];
-        struct ibv_sysfs_dev   *next;
-        int                     abi_ver;
-        int                     have_driver;
-};
-
-struct vib_cmd_hdr{
-        __u32 command;
-        __u16 in_words;
-        __u16 out_words;
-};
-
-struct vib_cmd{
-    __u32 command;
-    __u16 in_words;
-    __u16 out_words;
-    __u64 response;
+enum{
+        VIRTIB_DEVICE_FIND_SYSFS = 1000,
+        VIRTIB_DEVICE_OPEN,
+        VIRTIB_DEVICE_CLOSE,
+        VIRTIB_DEVICE_MMAP,
+        VIRTIB_DEVICE_MUNMAP
 };
 
 enum{
-        IB_USER_VERBS_CMD_FIND_SYSFS = 1000,
-        IB_USER_VERBS_CMD_OPEN_DEV,
-        IB_USER_VERBS_CMD_MMAP,
-        IB_USER_VERBS_CMD_UNMAP,
-        IB_USER_VERBS_CMD_RING_DOORBELL,
-        IB_USER_VERBS_CMD_BUF_COPY,
-        IB_USER_VERBS_CMD_CLOSE_DEV_FD
+        VIRTIB_EVENT_READ,
+        VIRTIB_EVENT_POLL,
+        VIRTIB_EVENT_CLOSE
 };
 
-struct vib_mmap{
-        __u32 command;
-        __u32 page_size;
-        __u32 prot;
-        __u32 flags;
-        __u32 off;
+struct virtib_create_cq {
+	struct ibv_create_cq		ibv_cmd;
+	__u64				buf_addr;
+	__u64				db_addr;
 };
 
-enum{
-        VIRTIO_IB_EVENT_READ,
-        VIRTIO_IB_EVENT_POLL,
-        VIRTIO_IB_EVENT_CLOSE
+struct virtib_resize_cq {
+	struct ibv_resize_cq		ibv_cmd;
+	__u64				buf_addr;
 };
 
+struct virtib_create_srq {
+	struct ibv_create_srq		ibv_cmd;
+	__u64				buf_addr;
+	__u64				db_addr;
+};
+
+struct virtib_create_qp {
+	struct ibv_create_qp		ibv_cmd;
+	__u64				buf_addr;
+	__u64				db_addr;
+	__u8				log_sq_bb_count;
+	__u8				log_sq_stride;
+	__u8				sq_no_prefetch;	/* was reserved in ABI 2 */
+	__u8				reserved[5];
+};
 #endif

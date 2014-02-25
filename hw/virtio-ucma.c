@@ -58,8 +58,7 @@ static void virtucma_replace_response_if_any(struct rdma_ucm_cmd_hdr *hdr, void 
 {
 #define VIRTUCMA_CHECK_CMD_AND_REPLACE_RESPONSE(__cmd, __struct) \
     if (hdr->cmd == __cmd) {\
-        struct __struct *s = (void *) payload;\
-        s->response = (__u64) out;\
+        ((struct __struct *) payload)->response = (__u64) out;\
         return;\
     }\
 
