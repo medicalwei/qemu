@@ -141,6 +141,7 @@ static void virtib_convert_addresses_to_host_virt(void *buf)
     struct ibv_query_params *hdr = buf;
     if (hdr->command == IB_USER_VERBS_CMD_CREATE_CQ){
         struct virtib_create_cq *cmd = buf;
+        cmd->ibv_cmd.user_handle = (__u64) get_host_ram_addr(cmd->ibv_cmd.user_handle);
         cmd->buf_addr = (__u64) get_host_ram_addr(cmd->buf_addr);
         cmd->db_addr = (__u64) get_host_ram_addr(cmd->db_addr);
     } else if (hdr->command == IB_USER_VERBS_CMD_RESIZE_CQ){
@@ -148,12 +149,17 @@ static void virtib_convert_addresses_to_host_virt(void *buf)
         cmd->buf_addr = (__u64) get_host_ram_addr(cmd->buf_addr);
     } else if (hdr->command == IB_USER_VERBS_CMD_CREATE_SRQ){
         struct virtib_create_srq *cmd = buf;
+        cmd->ibv_cmd.user_handle = (__u64) get_host_ram_addr(cmd->ibv_cmd.user_handle);
         cmd->buf_addr = (__u64) get_host_ram_addr(cmd->buf_addr);
         cmd->db_addr = (__u64) get_host_ram_addr(cmd->db_addr);
     } else if (hdr->command == IB_USER_VERBS_CMD_CREATE_QP){
         struct virtib_create_qp *cmd = buf;
+        cmd->ibv_cmd.user_handle = (__u64) get_host_ram_addr(cmd->ibv_cmd.user_handle);
         cmd->buf_addr = (__u64) get_host_ram_addr(cmd->buf_addr);
         cmd->db_addr = (__u64) get_host_ram_addr(cmd->db_addr);
+    } else if (hdr->command == IB_USER_VERBS_CMD_CREATE_AH){
+        struct virtib_create_ah *cmd = buf;
+        cmd->ibv_cmd.user_handle = (__u64) get_host_ram_addr(cmd->ibv_cmd.user_handle);
     }
 }
 
@@ -330,7 +336,7 @@ static unsigned int virtib_device_munmap(VirtQueueElement *elem){
     resp = (int32_t) munmap(host_addr, length);
     mmap(host_addr, length, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_FIXED | MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     stq_p(elem->in_sg[0].iov_base, resp);
-    return 0;
+    return sizeof(resp);
 }
 
 static unsigned int (*virtib_device_cmd_callbacks[]) (VirtQueueElement *) = {
@@ -338,7 +344,7 @@ static unsigned int (*virtib_device_cmd_callbacks[]) (VirtQueueElement *) = {
     [VIRTIB_DEVICE_OPEN]       = virtib_device_open,
     [VIRTIB_DEVICE_CLOSE]      = virtib_device_close,
     [VIRTIB_DEVICE_MMAP]       = virtib_device_mmap,
-    [VIRTIB_DEVICE_MUNMAP]     = virtib_device_munmap
+    [VIRTIB_DEVICE_MUNMAP]     = virtib_device_munmap,
 };
 
 static void virtib_handle_device(VirtIODevice *vdev, VirtQueue *vq)

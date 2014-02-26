@@ -9,13 +9,13 @@ enum{
         VIRTIB_DEVICE_OPEN,
         VIRTIB_DEVICE_CLOSE,
         VIRTIB_DEVICE_MMAP,
-        VIRTIB_DEVICE_MUNMAP
+        VIRTIB_DEVICE_MUNMAP,
 };
 
 enum{
         VIRTIB_EVENT_READ,
         VIRTIB_EVENT_POLL,
-        VIRTIB_EVENT_CLOSE
+        VIRTIB_EVENT_CLOSE,
 };
 
 struct virtib_create_cq {
@@ -43,5 +43,9 @@ struct virtib_create_qp {
 	__u8				log_sq_stride;
 	__u8				sq_no_prefetch;	/* was reserved in ABI 2 */
 	__u8				reserved[5];
+};
+
+struct virtib_create_ah {
+	struct ibv_create_ah		ibv_cmd;
 };
 #endif
