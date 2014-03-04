@@ -52,7 +52,6 @@ struct VirtQueueFdHandlerData{
 static void *get_host_ram_addr(ram_addr_t addr){
     MemoryRegionSection section;
 
-    printf("get_host_ram_addr %p\n", (void *) addr);
     addr = TARGET_PAGE_ALIGN(addr);
     section = memory_region_find(get_system_memory(), addr, 1);
     assert(memory_region_is_ram(section.mr));
@@ -142,21 +141,15 @@ static void virtib_convert_addresses_to_host_virt(void *buf)
     if (hdr->command == IB_USER_VERBS_CMD_CREATE_CQ){
         struct virtib_create_cq *cmd = buf;
         cmd->ibv_cmd.user_handle = (__u64) get_host_ram_addr(cmd->ibv_cmd.user_handle);
-        cmd->buf_addr = (__u64) get_host_ram_addr(cmd->buf_addr);
-        cmd->db_addr = (__u64) get_host_ram_addr(cmd->db_addr);
     } else if (hdr->command == IB_USER_VERBS_CMD_RESIZE_CQ){
         struct virtib_resize_cq *cmd = buf;
         cmd->buf_addr = (__u64) get_host_ram_addr(cmd->buf_addr);
     } else if (hdr->command == IB_USER_VERBS_CMD_CREATE_SRQ){
         struct virtib_create_srq *cmd = buf;
         cmd->ibv_cmd.user_handle = (__u64) get_host_ram_addr(cmd->ibv_cmd.user_handle);
-        cmd->buf_addr = (__u64) get_host_ram_addr(cmd->buf_addr);
-        cmd->db_addr = (__u64) get_host_ram_addr(cmd->db_addr);
     } else if (hdr->command == IB_USER_VERBS_CMD_CREATE_QP){
         struct virtib_create_qp *cmd = buf;
         cmd->ibv_cmd.user_handle = (__u64) get_host_ram_addr(cmd->ibv_cmd.user_handle);
-        cmd->buf_addr = (__u64) get_host_ram_addr(cmd->buf_addr);
-        cmd->db_addr = (__u64) get_host_ram_addr(cmd->db_addr);
     } else if (hdr->command == IB_USER_VERBS_CMD_CREATE_AH){
         struct virtib_create_ah *cmd = buf;
         cmd->ibv_cmd.user_handle = (__u64) get_host_ram_addr(cmd->ibv_cmd.user_handle);
@@ -187,10 +180,12 @@ static void virtib_handle_write(VirtIODevice *vdev, VirtQueue *vq)
 
         virtib_convert_addresses_to_host_virt(in);
 
-        if (DEBUG)
-            printf("DEBUG: write cmd: %s, fd: %d\n", virtib_cmd_name[hdr->command], fd);
-
         resp = write(fd, in, elem.out_sg[1].iov_len);
+
+        if (DEBUG)
+            printf("DEBUG: write cmd: %s, fd: %d, return: %d\n",
+                    virtib_cmd_name[hdr->command], fd, resp);
+
         stl_p(elem.in_sg[0].iov_base, resp);
         virtqueue_push(vq, &elem, sizeof(int) + IB_UVERBS_CMD_MAX_SIZE);
     }
@@ -310,6 +305,7 @@ static unsigned int virtib_device_mmap(VirtQueueElement *elem){
     void *host_addr;
     uint64_t resp;
 
+    printf("qemu: virtib_device_mmap\n");
     host_addr = get_host_ram_addr(addr);
     munmap(host_addr, length);
     resp = (uint64_t) mmap(host_addr, length, PROT_WRITE, MAP_FIXED | MAP_SHARED, fd, offset);
@@ -332,6 +328,7 @@ static unsigned int virtib_device_munmap(VirtQueueElement *elem){
     void *host_addr;
     int32_t resp;
 
+    printf("qemu: virtib_device_munmap\n");
     host_addr = get_host_ram_addr(addr);
     resp = (int32_t) munmap(host_addr, length);
     mmap(host_addr, length, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_FIXED | MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
