@@ -49,15 +49,6 @@ struct VirtQueueFdHandlerData{
     VirtQueueElement elem;
 };
 
-static void *get_host_ram_addr(ram_addr_t addr){
-    MemoryRegionSection section;
-
-    addr = TARGET_PAGE_ALIGN(addr);
-    section = memory_region_find(get_system_memory(), addr, 1);
-    assert(memory_region_is_ram(section.mr));
-    return memory_region_get_ram_ptr(section.mr) + section.offset_within_region;
-}
-
 static void virtib_get_config(VirtIODevice *vdev, uint8_t *config)
 {
 }
@@ -135,27 +126,6 @@ const char *virtib_cmd_name[] = {
     VIRTIB_EACH_CMD_NAME(IB_USER_VERBS_CMD_POST_SRQ_RECV)
 };
 
-static void virtib_convert_addresses_to_host_virt(void *buf)
-{
-    struct ibv_query_params *hdr = buf;
-    if (hdr->command == IB_USER_VERBS_CMD_CREATE_CQ){
-        struct virtib_create_cq *cmd = buf;
-        cmd->ibv_cmd.user_handle = (__u64) get_host_ram_addr(cmd->ibv_cmd.user_handle);
-    } else if (hdr->command == IB_USER_VERBS_CMD_RESIZE_CQ){
-        struct virtib_resize_cq *cmd = buf;
-        cmd->buf_addr = (__u64) get_host_ram_addr(cmd->buf_addr);
-    } else if (hdr->command == IB_USER_VERBS_CMD_CREATE_SRQ){
-        struct virtib_create_srq *cmd = buf;
-        cmd->ibv_cmd.user_handle = (__u64) get_host_ram_addr(cmd->ibv_cmd.user_handle);
-    } else if (hdr->command == IB_USER_VERBS_CMD_CREATE_QP){
-        struct virtib_create_qp *cmd = buf;
-        cmd->ibv_cmd.user_handle = (__u64) get_host_ram_addr(cmd->ibv_cmd.user_handle);
-    } else if (hdr->command == IB_USER_VERBS_CMD_CREATE_AH){
-        struct virtib_create_ah *cmd = buf;
-        cmd->ibv_cmd.user_handle = (__u64) get_host_ram_addr(cmd->ibv_cmd.user_handle);
-    }
-}
-
 static void virtib_handle_write(VirtIODevice *vdev, VirtQueue *vq)
 {
     /* Element Segments
@@ -177,8 +147,6 @@ static void virtib_handle_write(VirtIODevice *vdev, VirtQueue *vq)
         if (hdr->out_words > 0){
             hdr->response = (__u64) elem.in_sg[1].iov_base;
         }
-
-        virtib_convert_addresses_to_host_virt(in);
 
         resp = write(fd, in, elem.out_sg[1].iov_len);
 
@@ -292,25 +260,18 @@ static unsigned int virtib_device_mmap(VirtQueueElement *elem){
     /* Element Segments
      * out_sg[0]  int32_t: VIRTIB_DEVICE_MMAP
      * out_sg[1]  int32_t: fd
-     * out_sg[2] uint64_t: guest physical address to be mapped
-     * out_sg[3] uint64_t: length
-     * out_sg[4] uint64_t: offset
+     * out_sg[2] uint64_t: offset
      *  in_sg[0] uint64_t: mmap return value
      */
-    int32_t    fd     = (int32_t)    ldl_p(elem->out_sg[1].iov_base);
-    ram_addr_t addr   = (ram_addr_t) ldq_p(elem->out_sg[2].iov_base);
-    size_t     length = (size_t)     ldq_p(elem->out_sg[3].iov_base);
-    off_t      offset = (off_t)      ldq_p(elem->out_sg[4].iov_base);
+    int32_t    fd     = (int32_t) ldl_p(elem->out_sg[1].iov_base);
+    off_t      offset = (off_t)   ldl_p(elem->out_sg[2].iov_base);
 
-    void *host_addr;
     uint64_t resp;
 
-    printf("qemu: virtib_device_mmap\n");
-    host_addr = get_host_ram_addr(addr);
-    munmap(host_addr, length);
-    resp = (uint64_t) mmap(host_addr, length, PROT_WRITE, MAP_FIXED | MAP_SHARED, fd, offset);
-    if ((void *) resp == (void *) -1)
-        perror("virtio-ib: mmap failed");
+    resp = (uint64_t) mmap(NULL, TARGET_PAGE_SIZE, PROT_WRITE, MAP_SHARED, fd, offset);
+
+    printf("mmap resp %lx\n", resp);
+
     stq_p(elem->in_sg[0].iov_base, resp);
     return sizeof(resp);
 }
@@ -318,30 +279,63 @@ static unsigned int virtib_device_mmap(VirtQueueElement *elem){
 static unsigned int virtib_device_munmap(VirtQueueElement *elem){
     /* Element Segments
      * out_sg[0]  int32_t: VIRTIB_DEVICE_MUNMAP
-     * out_sg[1] uint64_t: guest physical address to be unmapped
-     * out_sg[2] uint64_t: length
-     *  in_sg[0]  int32_t: munmap return value
+     * out_sg[1] uint64_t: address
+     *  in_sg[0]  int32_t: mmap return value
      */
-    ram_addr_t addr   = (ram_addr_t) ldq_p(elem->out_sg[1].iov_base);
-    size_t     length = (size_t)     ldq_p(elem->out_sg[2].iov_base);
-
-    void *host_addr;
+    void *addr = (void *) ldq_p(elem->out_sg[1].iov_base);
     int32_t resp;
 
-    printf("qemu: virtib_device_munmap\n");
-    host_addr = get_host_ram_addr(addr);
-    resp = (int32_t) munmap(host_addr, length);
-    mmap(host_addr, length, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_FIXED | MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    resp = (int32_t) munmap(addr, TARGET_PAGE_SIZE);
     stq_p(elem->in_sg[0].iov_base, resp);
     return sizeof(resp);
 }
 
+static unsigned int virtib_device_mcopy(VirtQueueElement *elem){
+    /* Element Segments
+     * out_sg[0]  int32_t: VIRTIB_DEVICE_MCOPY
+     * out_sg[1] uint64_t: destination host virtual address
+     * out_sg[2] variable: written data
+     * out_sg[3] uint32_t: byte count
+     */
+    unsigned long *dst = (void *) ldq_p(elem->out_sg[1].iov_base);
+    unsigned long *src = (void *) elem->out_sg[2].iov_base;
+    unsigned int bytecnt = ldl_p(elem->out_sg[3].iov_base);
+
+    while (bytecnt > 0) {
+        *dst++ = *src++;
+        *dst++ = *src++;
+        bytecnt -= 2 * sizeof (long);
+    }
+
+    return 0;
+}
+
+static unsigned int virtib_device_massign(VirtQueueElement *elem){
+    /* Element Segments
+     * out_sg[0]  int32_t: VIRTIB_DEVICE_MASSIGN or VIRTIB_DEVICE_MASSIGN_LONG
+     * out_sg[1] uint64_t: destination host virtual address
+     * out_sg[2] uint32_t or uint64_t: data to be assigned
+     */
+    int32_t cmd = ldl_p(elem->out_sg[0].iov_base);
+    if (cmd == VIRTIB_DEVICE_MASSIGN_LONG) {
+        uint64_t *dst = (void *) ldq_p(elem->out_sg[1].iov_base);
+        *dst = ldq_p(elem->out_sg[2].iov_base);
+    } else if (cmd == VIRTIB_DEVICE_MASSIGN) {
+        uint32_t *dst = (void *) ldq_p(elem->out_sg[1].iov_base);
+        *dst = ldl_p(elem->out_sg[2].iov_base);
+    }
+    return 0;
+}
+
 static unsigned int (*virtib_device_cmd_callbacks[]) (VirtQueueElement *) = {
-    [VIRTIB_DEVICE_FIND_SYSFS] = virtib_device_find_sysfs,
-    [VIRTIB_DEVICE_OPEN]       = virtib_device_open,
-    [VIRTIB_DEVICE_CLOSE]      = virtib_device_close,
-    [VIRTIB_DEVICE_MMAP]       = virtib_device_mmap,
-    [VIRTIB_DEVICE_MUNMAP]     = virtib_device_munmap,
+    [VIRTIB_DEVICE_FIND_SYSFS]   = virtib_device_find_sysfs,
+    [VIRTIB_DEVICE_OPEN]         = virtib_device_open,
+    [VIRTIB_DEVICE_CLOSE]        = virtib_device_close,
+    [VIRTIB_DEVICE_MMAP]         = virtib_device_mmap,
+    [VIRTIB_DEVICE_MUNMAP]       = virtib_device_munmap,
+    [VIRTIB_DEVICE_MCOPY]        = virtib_device_mcopy,
+    [VIRTIB_DEVICE_MASSIGN]      = virtib_device_massign,
+    [VIRTIB_DEVICE_MASSIGN_LONG] = virtib_device_massign,
 };
 
 static void virtib_handle_device(VirtIODevice *vdev, VirtQueue *vq)
