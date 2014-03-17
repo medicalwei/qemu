@@ -15,7 +15,7 @@
 
 #define MEMLINK_UNUSED 0
 #define MEMLINK_USED 1
-#define MEMLINK_SHMMAX 67108864
+#define MEMLINK_SHMMAX 268435456
 
 typedef struct Memlink {
 	void *host_memory;
@@ -108,7 +108,10 @@ void * get_shared_memory(VirtIOMemlink *vml, uint32_t gfn)
 
 		shminfo->mem = mmap(NULL, MEMLINK_SHMMAX, PROT_READ | PROT_WRITE,
 			MAP_SHARED, shminfo->id, 0);
-		shminfo->orig_mem = valloc(MEMLINK_SHMMAX);
+		shminfo->orig_mem = mmap(NULL, MEMLINK_SHMMAX,
+				PROT_READ | PROT_WRITE,
+				MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+
 		shminfo->usedcount = 0;
 
 		vml->shm_next.shm = shminfo;
@@ -185,7 +188,8 @@ static void virtio_memlink_link_address(VirtIOMemlink *vml, Memlink *ml)
 	unsigned long mem_size = ml->num_gfns << VIRTIO_MEMLINK_PFN_SHIFT;
 	int i;
 
-	ml->host_memory = valloc(mem_size);
+	ml->host_memory = mmap(NULL, mem_size, PROT_READ | PROT_WRITE,
+			MAP_SHARED | MAP_ANONYMOUS, -1, 0);
 
 	for (i=0; i<ml->num_gfns; i++) {
 		void * shmem = get_shared_memory(vml, ml->gfns[i]);
