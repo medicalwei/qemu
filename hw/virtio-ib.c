@@ -210,8 +210,6 @@ static unsigned int virtib_device_mmap(VirtQueueElement *elem){
 
     resp = (uint64_t) mmap(NULL, TARGET_PAGE_SIZE, PROT_WRITE, MAP_SHARED, fd, offset);
 
-    printf("mmap resp %lx\n", resp);
-
     stq_p(elem->in_sg[0].iov_base, resp);
     return sizeof(resp);
 }
