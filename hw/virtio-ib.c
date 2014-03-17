@@ -12,8 +12,6 @@
 #include <infiniband/verbs.h>
 #include <infiniband/driver.h>
 
-#define DEBUG 1
-
 #define IB_UVERBS_CMD_MAX_SIZE 16384
 #define VIRTIB_MAX_SYSFS_DEVS 10
 #define VIRTIB_UVERBS_DEV_PATH "/dev/infiniband/uverbs0"
@@ -84,48 +82,6 @@ static void virtib_set_status(struct VirtIODevice *vdev, uint8_t status)
 {
 }
 
-const char *virtib_cmd_name[] = {
-#define VIRTIB_EACH_CMD_NAME(__cmd) [__cmd] = #__cmd
-
-    VIRTIB_EACH_CMD_NAME(IB_USER_VERBS_CMD_GET_CONTEXT),
-    VIRTIB_EACH_CMD_NAME(IB_USER_VERBS_CMD_QUERY_DEVICE),
-    VIRTIB_EACH_CMD_NAME(IB_USER_VERBS_CMD_QUERY_PORT),
-    VIRTIB_EACH_CMD_NAME(IB_USER_VERBS_CMD_ALLOC_PD),
-    VIRTIB_EACH_CMD_NAME(IB_USER_VERBS_CMD_DEALLOC_PD),
-    VIRTIB_EACH_CMD_NAME(IB_USER_VERBS_CMD_CREATE_AH),
-    VIRTIB_EACH_CMD_NAME(IB_USER_VERBS_CMD_MODIFY_AH),
-    VIRTIB_EACH_CMD_NAME(IB_USER_VERBS_CMD_QUERY_AH),
-    VIRTIB_EACH_CMD_NAME(IB_USER_VERBS_CMD_DESTROY_AH),
-    VIRTIB_EACH_CMD_NAME(IB_USER_VERBS_CMD_REG_MR),
-    VIRTIB_EACH_CMD_NAME(IB_USER_VERBS_CMD_REG_SMR),
-    VIRTIB_EACH_CMD_NAME(IB_USER_VERBS_CMD_REREG_MR),
-    VIRTIB_EACH_CMD_NAME(IB_USER_VERBS_CMD_QUERY_MR),
-    VIRTIB_EACH_CMD_NAME(IB_USER_VERBS_CMD_DEREG_MR),
-    VIRTIB_EACH_CMD_NAME(IB_USER_VERBS_CMD_ALLOC_MW),
-    VIRTIB_EACH_CMD_NAME(IB_USER_VERBS_CMD_BIND_MW),
-    VIRTIB_EACH_CMD_NAME(IB_USER_VERBS_CMD_DEALLOC_MW),
-    VIRTIB_EACH_CMD_NAME(IB_USER_VERBS_CMD_CREATE_COMP_CHANNEL),
-    VIRTIB_EACH_CMD_NAME(IB_USER_VERBS_CMD_CREATE_CQ),
-    VIRTIB_EACH_CMD_NAME(IB_USER_VERBS_CMD_RESIZE_CQ),
-    VIRTIB_EACH_CMD_NAME(IB_USER_VERBS_CMD_DESTROY_CQ),
-    VIRTIB_EACH_CMD_NAME(IB_USER_VERBS_CMD_POLL_CQ),
-    VIRTIB_EACH_CMD_NAME(IB_USER_VERBS_CMD_PEEK_CQ),
-    VIRTIB_EACH_CMD_NAME(IB_USER_VERBS_CMD_REQ_NOTIFY_CQ),
-    VIRTIB_EACH_CMD_NAME(IB_USER_VERBS_CMD_CREATE_QP),
-    VIRTIB_EACH_CMD_NAME(IB_USER_VERBS_CMD_QUERY_QP),
-    VIRTIB_EACH_CMD_NAME(IB_USER_VERBS_CMD_MODIFY_QP),
-    VIRTIB_EACH_CMD_NAME(IB_USER_VERBS_CMD_DESTROY_QP),
-    VIRTIB_EACH_CMD_NAME(IB_USER_VERBS_CMD_POST_SEND),
-    VIRTIB_EACH_CMD_NAME(IB_USER_VERBS_CMD_POST_RECV),
-    VIRTIB_EACH_CMD_NAME(IB_USER_VERBS_CMD_ATTACH_MCAST),
-    VIRTIB_EACH_CMD_NAME(IB_USER_VERBS_CMD_DETACH_MCAST),
-    VIRTIB_EACH_CMD_NAME(IB_USER_VERBS_CMD_CREATE_SRQ),
-    VIRTIB_EACH_CMD_NAME(IB_USER_VERBS_CMD_MODIFY_SRQ),
-    VIRTIB_EACH_CMD_NAME(IB_USER_VERBS_CMD_QUERY_SRQ),
-    VIRTIB_EACH_CMD_NAME(IB_USER_VERBS_CMD_DESTROY_SRQ),
-    VIRTIB_EACH_CMD_NAME(IB_USER_VERBS_CMD_POST_SRQ_RECV)
-};
-
 static void virtib_handle_write(VirtIODevice *vdev, VirtQueue *vq)
 {
     /* Element Segments
@@ -150,10 +106,6 @@ static void virtib_handle_write(VirtIODevice *vdev, VirtQueue *vq)
 
         resp = write(fd, in, elem.out_sg[1].iov_len);
 
-        if (DEBUG)
-            printf("DEBUG: write cmd: %s, fd: %d, return: %d\n",
-                    virtib_cmd_name[hdr->command], fd, resp);
-
         stl_p(elem.in_sg[0].iov_base, resp);
         virtqueue_push(vq, &elem, sizeof(int) + IB_UVERBS_CMD_MAX_SIZE);
     }
@@ -168,10 +120,6 @@ static void virtib_handle_read(VirtIODevice *vdev, VirtQueue *vq)
     int fd;
 
     while(virtqueue_pop(vq, &elem)){
-#if DEBUG
-        printf("read path:%s\n", (char*) elem.out_sg[0].iov_base);
-#endif
-
         fd = open((char*)elem.out_sg[0].iov_base, O_RDONLY);
 
         if(fd < 0){
@@ -180,10 +128,6 @@ static void virtib_handle_read(VirtIODevice *vdev, VirtQueue *vq)
         }
 
         ret_len = read(fd, elem.in_sg[0].iov_base, elem.in_sg[0].iov_len);
-
-#if DEBUG
-        printf("%s, %d\n", (char*) elem.in_sg[0].iov_base, ret_len);
-#endif
 
         close(fd);
 
@@ -199,10 +143,6 @@ static int get_sysfs_devs(struct ibv_sysfs_dev *sysfs_dev_list, struct ibv_sysfs
 {
     struct ibv_sysfs_dev *sysfs_dev = NULL;
     int i = 0, j = 0;
-
-#if DEBUG
-    printf("get_sysfs_devs\n");
-#endif
 
     for(sysfs_dev = sysfs_dev_list; sysfs_dev; sysfs_dev = sysfs_dev->next){
         memcpy(&sysfs[i], sysfs_dev, sizeof(struct ibv_sysfs_dev));
