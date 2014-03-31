@@ -196,72 +196,49 @@ static unsigned int virtib_device_close(VirtQueueElement *elem){
     return sizeof(resp);
 }
 
+static void * gpa_to_hva(ram_addr_t pa)
+{
+    MemoryRegionSection section;
+
+    section = memory_region_find(get_system_memory(), pa, 1);
+
+    if (!section.size || !memory_region_is_ram(section.mr)){
+        return NULL;
+    }
+
+    return memory_region_get_ram_ptr(section.mr) +
+        section.offset_within_region;
+}
+
 static unsigned int virtib_device_mmap(VirtQueueElement *elem){
     /* Element Segments
      * out_sg[0]  int32_t: VIRTIB_DEVICE_MMAP
      * out_sg[1]  int32_t: fd
-     * out_sg[2] uint64_t: offset
-     *  in_sg[0] uint64_t: mmap return value
+     * out_sg[2] uint32_t: offset
+     * out_sg[3] uint64_t: address
      */
-    int32_t    fd     = (int32_t) ldl_p(elem->out_sg[1].iov_base);
-    off_t      offset = (off_t)   ldl_p(elem->out_sg[2].iov_base);
+    int32_t     fd     = (int32_t)    ldl_p(elem->out_sg[1].iov_base);
+    off_t       offset = (off_t)      ldl_p(elem->out_sg[2].iov_base);
+    ram_addr_t  pa     = (ram_addr_t) ldq_p(elem->out_sg[3].iov_base);
+    void       *addr   = gpa_to_hva(pa);
 
-    uint64_t resp;
+    munmap(addr, TARGET_PAGE_SIZE);
+    mmap(addr, TARGET_PAGE_SIZE, PROT_WRITE, MAP_SHARED | MAP_FIXED, fd, offset);
 
-    resp = (uint64_t) mmap(NULL, TARGET_PAGE_SIZE, PROT_WRITE, MAP_SHARED, fd, offset);
-
-    stq_p(elem->in_sg[0].iov_base, resp);
-    return sizeof(resp);
+    return 0;
 }
 
 static unsigned int virtib_device_munmap(VirtQueueElement *elem){
     /* Element Segments
      * out_sg[0]  int32_t: VIRTIB_DEVICE_MUNMAP
      * out_sg[1] uint64_t: address
-     *  in_sg[0]  int32_t: mmap return value
      */
-    void *addr = (void *) ldq_p(elem->out_sg[1].iov_base);
-    int32_t resp;
+    ram_addr_t  pa   = (ram_addr_t) ldq_p(elem->out_sg[1].iov_base);
+    void       *addr = gpa_to_hva(pa);
 
-    resp = (int32_t) munmap(addr, TARGET_PAGE_SIZE);
-    stq_p(elem->in_sg[0].iov_base, resp);
-    return sizeof(resp);
-}
+    munmap(addr, TARGET_PAGE_SIZE);
+    mmap(addr, TARGET_PAGE_SIZE, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
 
-static unsigned int virtib_device_mcopy(VirtQueueElement *elem){
-    /* Element Segments
-     * out_sg[0]  int32_t: VIRTIB_DEVICE_MCOPY
-     * out_sg[1] uint64_t: destination host virtual address
-     * out_sg[2] variable: written data
-     * out_sg[3] uint32_t: byte count
-     */
-    unsigned long *dst = (void *) ldq_p(elem->out_sg[1].iov_base);
-    unsigned long *src = (void *) elem->out_sg[2].iov_base;
-    unsigned int bytecnt = ldl_p(elem->out_sg[3].iov_base);
-
-    while (bytecnt > 0) {
-        *dst++ = *src++;
-        *dst++ = *src++;
-        bytecnt -= 2 * sizeof (long);
-    }
-
-    return 0;
-}
-
-static unsigned int virtib_device_massign(VirtQueueElement *elem){
-    /* Element Segments
-     * out_sg[0]  int32_t: VIRTIB_DEVICE_MASSIGN or VIRTIB_DEVICE_MASSIGN_LONG
-     * out_sg[1] uint64_t: destination host virtual address
-     * out_sg[2] uint32_t or uint64_t: data to be assigned
-     */
-    int32_t cmd = ldl_p(elem->out_sg[0].iov_base);
-    if (cmd == VIRTIB_DEVICE_MASSIGN_LONG) {
-        uint64_t *dst = (void *) ldq_p(elem->out_sg[1].iov_base);
-        *dst = ldq_p(elem->out_sg[2].iov_base);
-    } else if (cmd == VIRTIB_DEVICE_MASSIGN) {
-        uint32_t *dst = (void *) ldq_p(elem->out_sg[1].iov_base);
-        *dst = ldl_p(elem->out_sg[2].iov_base);
-    }
     return 0;
 }
 
@@ -271,9 +248,6 @@ static unsigned int (*virtib_device_cmd_callbacks[]) (VirtQueueElement *) = {
     [VIRTIB_DEVICE_CLOSE]        = virtib_device_close,
     [VIRTIB_DEVICE_MMAP]         = virtib_device_mmap,
     [VIRTIB_DEVICE_MUNMAP]       = virtib_device_munmap,
-    [VIRTIB_DEVICE_MCOPY]        = virtib_device_mcopy,
-    [VIRTIB_DEVICE_MASSIGN]      = virtib_device_massign,
-    [VIRTIB_DEVICE_MASSIGN_LONG] = virtib_device_massign,
 };
 
 static void virtib_handle_device(VirtIODevice *vdev, VirtQueue *vq)
