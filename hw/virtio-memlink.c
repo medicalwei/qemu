@@ -44,7 +44,6 @@ static void virtio_memlink_handle_create(VirtIODevice *vdev, VirtQueue *vq)
         }
 
         memlink_link_address(ml);
-        ml->offseted_host_memory = ml->host_memory + ml->offset;
 
         QLIST_INSERT_HEAD(&vml->memlink_head, ml, next);
 

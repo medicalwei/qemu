@@ -152,6 +152,11 @@ void memlink_link_address(Memlink *ml)
     unsigned long mem_size = ml->num_gfns << TARGET_PAGE_BITS;
     int i;
 
+    if (ml->num_gfns == 1) {
+        ml->host_memory = gfn_to_hva(ml->gfns[0], NULL);
+        goto finalize;
+    }
+
     ml->host_memory = mmap(NULL, mem_size, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
 
     for (i=0; i<ml->num_gfns; i++) {
@@ -159,14 +164,19 @@ void memlink_link_address(Memlink *ml)
         uint32_t offset = i << TARGET_PAGE_BITS;
         mremap(shmem, 0, TARGET_PAGE_SIZE, MREMAP_MAYMOVE | MREMAP_FIXED, ml->host_memory + offset);
     }
+
+finalize:
+    ml->offseted_host_memory = ml->host_memory + ml->offset;
 }
 
 void memlink_unlink_address(Memlink *ml)
 {
     int i;
 
-    for (i=0; i<ml->num_gfns; i++) {
-        put_shared_memory(ml->gfns[i]);
+    if (ml->num_gfns > 1){
+        for (i=0; i<ml->num_gfns; i++) {
+            put_shared_memory(ml->gfns[i]);
+        }
     }
 }
 
