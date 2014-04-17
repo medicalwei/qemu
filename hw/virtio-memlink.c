@@ -8,11 +8,17 @@
 
 #define DEBUG 0
 
+typedef struct MemlinkListItem
+{
+    Memlink ml;
+    QLIST_ENTRY(MemlinkListItem) next;
+} MemlinkListItem;
+
 typedef struct VirtIOMemlink {
     VirtIODevice vdev;
     VirtQueue *create_vq;
     VirtQueue *revoke_vq;
-    QLIST_HEAD(, Memlink) memlink_head;
+    QLIST_HEAD(, MemlinkListItem) memlink_head;
     VirtQueueElement stats_vq_elem;
     DeviceState *qdev;
     uint32_t state_count;
@@ -24,30 +30,27 @@ static void virtio_memlink_handle_create(VirtIODevice *vdev, VirtQueue *vq)
     VirtIOMemlink *vml = DO_UPCAST(VirtIOMemlink, vdev, vdev);
 
     while (virtqueue_pop(vq, &elem)) {
-        Memlink *ml;
-        int i;
+        MemlinkListItem *ml;
 
-        ml = (Memlink *) malloc(sizeof(Memlink));
+        ml = (MemlinkListItem *) malloc(sizeof(MemlinkListItem));
 
-        ml->offset = ldl_p(elem.out_sg[1].iov_base);
-        if (ml->offset >= TARGET_PAGE_SIZE) {
+        ml->ml.offset = ldl_p(elem.out_sg[1].iov_base);
+        if (ml->ml.offset >= TARGET_PAGE_SIZE) {
             error_report("virtio-memlink invalid offset");
             free(ml);
             continue;
         }
 
-        ml->num_gfns = elem.out_sg[2].iov_len / sizeof(uint32_t);
-        ml->gfns = (uint32_t *) malloc(sizeof(uint32_t) * ml->num_gfns);
+        ml->ml.num_gfns = elem.out_sg[2].iov_len / sizeof(uint32_t);
+        ml->ml.gfns = (uint32_t *) malloc(elem.out_sg[2].iov_len);
 
-        for (i=0; i<ml->num_gfns; i++) {
-            ml->gfns[i] = ldl_p(elem.out_sg[2].iov_base + (sizeof(uint32_t)*i));
-        }
+        iov_to_buf(&elem.out_sg[2], 1, 0, &ml->ml.gfns, elem.out_sg[2].iov_len);
 
-        memlink_link_address(ml);
+        memlink_link_address(&ml->ml);
 
         QLIST_INSERT_HEAD(&vml->memlink_head, ml, next);
 
-        stq_p(elem.in_sg[0].iov_base, (uint64_t) ml->offseted_host_memory);
+        stq_p(elem.in_sg[0].iov_base, (uint64_t) ml->ml.offseted_host_memory);
 
         virtqueue_push(vq, &elem, 0);
         virtio_notify(vdev, vq);
@@ -71,10 +74,10 @@ static void virtio_memlink_handle_revoke(VirtIODevice *vdev, VirtQueue *vq)
         printf("virtio-memlink revoke address: %p\n", offseted_host_memory);
 #endif
 
-        Memlink *ml;
+        MemlinkListItem *ml;
 
         QLIST_FOREACH(ml, &vml->memlink_head, next) {
-            if (ml->offseted_host_memory == offseted_host_memory){
+            if (ml->ml.offseted_host_memory == offseted_host_memory){
                 break;
             }
         }
@@ -84,9 +87,9 @@ static void virtio_memlink_handle_revoke(VirtIODevice *vdev, VirtQueue *vq)
             continue;
         }
 
-        memlink_unlink_address(ml);
-
+        memlink_unlink_address(&ml->ml);
         QLIST_REMOVE(ml, next);
+        free(ml);
 
         virtqueue_push(vq, &elem, 0);
         virtio_notify(vdev, vq);

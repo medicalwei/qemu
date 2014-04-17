@@ -5,16 +5,60 @@
 #include "memory.h"
 #include "exec-memory.h"
 #include "virtio-ib.h"
+#include "memlink.h"
 
 #include <poll.h>
 #include <sys/mman.h>
 #include <dirent.h>
+#include <infiniband/kern-abi.h>
 #include <infiniband/verbs.h>
 #include <infiniband/driver.h>
 
 #define IB_UVERBS_CMD_MAX_SIZE 16384
 #define VIRTIB_MAX_SYSFS_DEVS 10
 #define VIRTIB_UVERBS_DEV_PATH "/dev/infiniband/uverbs0"
+
+typedef struct QueueMemlink
+{
+    uint32_t handle;
+    Memlink buf_ml;
+    Memlink db_ml;
+    QLIST_ENTRY(QueueMemlink) next;
+} QueueMemlink;
+
+typedef struct MemoryRegionMemlink
+{
+    uint32_t handle;
+    Memlink ml;
+    QLIST_ENTRY(MemoryRegionMemlink) next;
+} MemoryRegionMemlink;
+
+typedef struct VirtIBCreateCQ {
+        struct ibv_create_cq            ibv_cmd;
+	__u64				buf_addr;
+	__u64				db_addr;
+} VirtIBCreateCQ;
+
+typedef struct VirtIBResizeCQ {
+	struct ibv_resize_cq		ibv_cmd;
+	__u64				buf_addr;
+} VirtIBResizeCQ;
+
+typedef struct VirtIBCreateSRQ {
+	struct ibv_create_srq		ibv_cmd;
+	__u64				buf_addr;
+	__u64				db_addr;
+} VirtIBCreateSRQ;
+
+typedef struct VirtIBCreateQP {
+	struct ibv_create_qp		ibv_cmd;
+	__u64				buf_addr;
+	__u64				db_addr;
+	__u8				log_sq_bb_count;
+	__u8				log_sq_stride;
+	__u8				sq_no_prefetch;	/* was reserved in ABI 2 */
+	__u8				reserved[5];
+} VirtIBCreateQP;
 
 typedef struct VirtIOIB
 {
@@ -24,6 +68,11 @@ typedef struct VirtIOIB
     VirtQueue *device_vq;
     VirtQueue *event_vq;
     VirtQueue *event_poll_vq;
+
+    QLIST_HEAD(, QueueMemlink) cq_memlinks;
+    QLIST_HEAD(, QueueMemlink) srq_memlinks;
+    QLIST_HEAD(, QueueMemlink) qp_memlinks;
+    QLIST_HEAD(, MemoryRegionMemlink) mr_memlinks;
 
     DeviceState *qdev;
     int status;
@@ -82,11 +131,232 @@ static void virtib_set_status(struct VirtIODevice *vdev, uint8_t status)
 {
 }
 
+static void virtib_handle_memlink_before_write(VirtIODevice *vdev, VirtQueueElement *elem, struct ibv_query_params *hdr)
+{
+    VirtIOIB *ib = DO_UPCAST(VirtIOIB, vdev, vdev);
+    QueueMemlink *qml;
+    MemoryRegionMemlink *mrml;
+
+    uint64_t buf_addr, db_addr, mr_addr;
+    VirtIBCreateCQ  *cmd_create_cq = (void *) hdr;
+    VirtIBResizeCQ  *cmd_resize_cq = (void *) hdr;
+    VirtIBCreateSRQ *cmd_create_srq = (void *) hdr;
+    VirtIBCreateQP  *cmd_create_qp = (void *) hdr;
+    struct ibv_reg_mr *cmd_reg_mr = (void *) hdr;
+
+    /* step 1: get addrs from elem */
+    switch (hdr->command){
+        case IB_USER_VERBS_CMD_CREATE_CQ:
+        buf_addr = cmd_create_cq->buf_addr;
+        db_addr = cmd_create_cq->db_addr;
+        break;
+
+        case IB_USER_VERBS_CMD_RESIZE_CQ:
+        buf_addr = cmd_resize_cq->buf_addr;
+        db_addr = 0;
+        break;
+
+        case IB_USER_VERBS_CMD_CREATE_SRQ:
+        buf_addr = cmd_create_srq->buf_addr;
+        db_addr = cmd_create_srq->db_addr;
+        break;
+
+        case IB_USER_VERBS_CMD_CREATE_QP:
+        buf_addr = cmd_create_qp->buf_addr;
+        db_addr = cmd_create_qp->db_addr;
+        break;
+
+        case IB_USER_VERBS_CMD_REG_MR:
+        mr_addr = cmd_reg_mr->start;
+        break;
+    }
+
+    /* step 2: allocate memlinks */
+    switch (hdr->command){
+        case IB_USER_VERBS_CMD_CREATE_CQ:
+        case IB_USER_VERBS_CMD_RESIZE_CQ:
+        case IB_USER_VERBS_CMD_CREATE_SRQ:
+        case IB_USER_VERBS_CMD_CREATE_QP:
+
+        qml = (QueueMemlink *) malloc(sizeof(*qml));
+	qml->handle = 0;
+
+        qml->buf_ml.num_gfns = elem->out_sg[2].iov_len / sizeof(uint32_t);
+	qml->buf_ml.gfns = (void *) malloc(elem->out_sg[2].iov_len);
+        iov_to_buf(&elem->out_sg[2], 1, 0, qml->buf_ml.gfns, elem->out_sg[2].iov_len);
+        qml->buf_ml.offset = (unsigned int) (buf_addr & (~TARGET_PAGE_MASK));
+        memlink_link_address(&qml->buf_ml);
+
+        if (db_addr != 0){
+            qml->db_ml.num_gfns = elem->out_sg[3].iov_len / sizeof(uint32_t);
+	    qml->db_ml.gfns = (void *) malloc(elem->out_sg[3].iov_len);
+            iov_to_buf(&elem->out_sg[3], 1, 0, qml->db_ml.gfns, elem->out_sg[3].iov_len);
+            qml->db_ml.offset = (unsigned int) (db_addr & (~TARGET_PAGE_MASK));
+            memlink_link_address(&qml->db_ml);
+        } else {
+            qml->db_ml.num_gfns = 0;
+	}
+
+        break;
+
+        case IB_USER_VERBS_CMD_REG_MR:
+        mrml = (MemoryRegionMemlink *) malloc(sizeof(*mrml));
+	mrml->handle = 0;
+
+        mrml->ml.num_gfns = elem->out_sg[2].iov_len / sizeof(uint32_t);
+	mrml->ml.gfns = (void *) malloc(elem->out_sg[2].iov_len);
+        iov_to_buf(&elem->out_sg[2], 1, 0, mrml->ml.gfns, elem->out_sg[2].iov_len);
+        mrml->ml.offset = (unsigned int) (mr_addr & (~TARGET_PAGE_MASK));
+        memlink_link_address(&mrml->ml);
+
+        break;
+    }
+
+    /* step 3: save host addresses */
+    switch (hdr->command){
+        case IB_USER_VERBS_CMD_CREATE_CQ:
+        cmd_create_cq->buf_addr = (uint64_t) qml->buf_ml.offseted_host_memory;
+        cmd_create_cq->db_addr = (uint64_t) qml->db_ml.offseted_host_memory;
+	QLIST_INSERT_HEAD(&ib->cq_memlinks, qml, next);
+        break;
+
+        case IB_USER_VERBS_CMD_RESIZE_CQ:
+        cmd_resize_cq->buf_addr = (uint64_t) qml->buf_ml.offseted_host_memory;
+	QLIST_INSERT_HEAD(&ib->cq_memlinks, qml, next);
+        break;
+
+        case IB_USER_VERBS_CMD_CREATE_SRQ:
+        cmd_create_srq->buf_addr = (uint64_t) qml->buf_ml.offseted_host_memory;
+        cmd_create_srq->db_addr = (uint64_t) qml->db_ml.offseted_host_memory;
+	QLIST_INSERT_HEAD(&ib->srq_memlinks, qml, next);
+        break;
+
+        case IB_USER_VERBS_CMD_CREATE_QP:
+        cmd_create_qp->buf_addr = (uint64_t) qml->buf_ml.offseted_host_memory;
+        cmd_create_qp->db_addr = (uint64_t) qml->db_ml.offseted_host_memory;
+	QLIST_INSERT_HEAD(&ib->qp_memlinks, qml, next);
+        break;
+
+        case IB_USER_VERBS_CMD_REG_MR:
+        cmd_reg_mr->start = (uint64_t) mrml->ml.offseted_host_memory;
+	QLIST_INSERT_HEAD(&ib->mr_memlinks, mrml, next);
+        break;
+    }
+    /* TODO: give a handle after sending sending command to device */
+}
+
+static void virtib_handle_memlink_after_write(VirtIODevice *vdev, VirtQueueElement *elem, struct ibv_query_params *hdr)
+{
+    VirtIOIB *ib = DO_UPCAST(VirtIOIB, vdev, vdev);
+    QueueMemlink *qml = NULL, *qml_safe;
+    MemoryRegionMemlink *mrml = NULL, *mrml_safe;
+
+    const struct ibv_create_cq_resp  *cmd_create_cq_resp  = (void *) hdr->response;
+    const struct ibv_create_srq_resp *cmd_create_srq_resp = (void *) hdr->response;
+    const struct ibv_create_qp_resp  *cmd_create_qp_resp  = (void *) hdr->response;
+    const struct ibv_reg_mr_resp     *cmd_reg_mr_resp     = (void *) hdr->response;
+
+    const struct ibv_destroy_cq      *cmd_destroy_cq      = (void *) hdr;
+    const struct ibv_resize_cq       *cmd_resize_cq       = (void *) hdr;
+    const struct ibv_destroy_srq     *cmd_destroy_srq     = (void *) hdr;
+    const struct ibv_destroy_qp      *cmd_destroy_qp      = (void *) hdr;
+    const struct ibv_dereg_mr        *cmd_dereg_mr        = (void *) hdr;
+
+    /* step 1: remove memlinks first */
+    switch (hdr->command){
+	case IB_USER_VERBS_CMD_DESTROY_CQ:
+	QLIST_FOREACH_SAFE(qml, &ib->cq_memlinks, next, qml_safe){
+	    if (cmd_destroy_cq->cq_handle == qml->handle){
+		memlink_unlink_address(&qml->buf_ml);
+		free(qml->buf_ml.gfns);
+		if (qml->db_ml.num_gfns > 0){
+		    memlink_unlink_address(&qml->db_ml);
+		    free(qml->db_ml.gfns);
+		}
+		QLIST_REMOVE(qml, next);
+		free(qml);
+	    }
+	}
+	break;
+
+	case IB_USER_VERBS_CMD_DESTROY_SRQ:
+	QLIST_FOREACH_SAFE(qml, &ib->srq_memlinks, next, qml_safe){
+	    if (cmd_destroy_srq->srq_handle == qml->handle){
+		memlink_unlink_address(&qml->buf_ml);
+		free(qml->buf_ml.gfns);
+		if (qml->db_ml.num_gfns > 0){
+		    memlink_unlink_address(&qml->db_ml);
+		    free(qml->db_ml.gfns);
+		}
+		QLIST_REMOVE(qml, next);
+		free(qml);
+	    }
+	}
+	break;
+
+	case IB_USER_VERBS_CMD_DESTROY_QP:
+	QLIST_FOREACH_SAFE(qml, &ib->qp_memlinks, next, qml_safe){
+	    if (cmd_destroy_qp->qp_handle == qml->handle){
+		memlink_unlink_address(&qml->buf_ml);
+		free(qml->buf_ml.gfns);
+		if (qml->db_ml.num_gfns > 0){
+		    memlink_unlink_address(&qml->db_ml);
+		    free(qml->db_ml.gfns);
+		}
+		QLIST_REMOVE(qml, next);
+		free(qml);
+	    }
+	}
+	break;
+
+	case IB_USER_VERBS_CMD_DEREG_MR:
+	QLIST_FOREACH_SAFE(mrml, &ib->mr_memlinks, next, mrml_safe){
+	    if (cmd_dereg_mr->mr_handle == mrml->handle){
+		memlink_unlink_address(&mrml->ml);
+		free(mrml->ml.gfns);
+		QLIST_REMOVE(mrml, next);
+		free(mrml);
+	    }
+	}
+	break;
+    }
+
+    /* step 2: add handle to assigned memlink */
+    switch (hdr->command){
+        case IB_USER_VERBS_CMD_CREATE_CQ:
+	qml = QLIST_FIRST(&ib->cq_memlinks);
+	qml->handle = cmd_create_cq_resp->cq_handle;
+        break;
+
+        case IB_USER_VERBS_CMD_RESIZE_CQ:
+	qml = QLIST_FIRST(&ib->cq_memlinks);
+	qml->handle = cmd_resize_cq->cq_handle;
+        break;
+
+        case IB_USER_VERBS_CMD_CREATE_SRQ:
+	qml = QLIST_FIRST(&ib->srq_memlinks);
+	qml->handle = cmd_create_srq_resp->srq_handle;
+        break;
+
+        case IB_USER_VERBS_CMD_CREATE_QP:
+	qml = QLIST_FIRST(&ib->qp_memlinks);
+	qml->handle = cmd_create_qp_resp->qp_handle;
+        break;
+
+        case IB_USER_VERBS_CMD_REG_MR:
+	mrml = QLIST_FIRST(&ib->mr_memlinks);
+	mrml->handle = cmd_reg_mr_resp->mr_handle;
+        break;
+    }
+}
+
 static void virtib_handle_write(VirtIODevice *vdev, VirtQueue *vq)
 {
     /* Element Segments
      * out_sg[0] int32_t: fd
      * out_sg[1] VAR_LEN: ibv command
+     * out_sg[2] VAR_LEN: (OPTIONAL) memlink segments for buf_addr or mr_addr
+     * out_sg[3] VAR_LEN: (OPTIONAL) memlink segments for db_addr
      *  in_sg[0] int32_t: write response
      *  in_sg[1] VAR_LEN: data response
      */
@@ -104,7 +374,11 @@ static void virtib_handle_write(VirtIODevice *vdev, VirtQueue *vq)
             hdr->response = (__u64) elem.in_sg[1].iov_base;
         }
 
+        virtib_handle_memlink_before_write(vdev, &elem, hdr);
+
         resp = write(fd, in, elem.out_sg[1].iov_len);
+
+        virtib_handle_memlink_after_write(vdev, &elem, hdr);
 
         stl_p(elem.in_sg[0].iov_base, resp);
         virtqueue_push(vq, &elem, sizeof(int) + IB_UVERBS_CMD_MAX_SIZE);
@@ -416,6 +690,13 @@ VirtIODevice *virtio_ib_init(DeviceState *dev)
     ib->qdev = dev;
     ib->status = 99;
 
+    memlink_init();
+
+    QLIST_INIT(&ib->mr_memlinks);
+    QLIST_INIT(&ib->cq_memlinks);
+    QLIST_INIT(&ib->srq_memlinks);
+    QLIST_INIT(&ib->qp_memlinks);
+
     if (find_sysfs_devs())
         error_report("virtio-ib: Can't not find InfiniBand!\n");
 
@@ -428,5 +709,6 @@ VirtIODevice *virtio_ib_init(DeviceState *dev)
 void virtio_ib_exit(VirtIODevice *vdev)
 {
     VirtIOIB *ib = DO_UPCAST(VirtIOIB, vdev, vdev);
+    memlink_exit();
     unregister_savevm(ib->qdev, "virtio-ib", ib);
 }

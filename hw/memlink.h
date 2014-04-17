@@ -9,7 +9,6 @@ typedef struct Memlink {
     unsigned int num_gfns;
     uint32_t *gfns;
     unsigned int offset;
-    QLIST_ENTRY(Memlink) next;
 } Memlink;
 
 void memlink_link_address(Memlink *ml);
