@@ -545,7 +545,7 @@ static void virtib_event_poll(void *opaque)
     ssize_t len, ret;
 
     fd = ldl_p(t->elem.out_sg[0].iov_base);
-    cmd = (__s32) ldl_p(t->elem.out_sg[1].iov_base);
+    cmd = ldl_p(t->elem.out_sg[1].iov_base);
 
     switch(cmd){
         case VIRTIB_EVENT_READ:
