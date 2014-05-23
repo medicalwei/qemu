@@ -8,6 +8,8 @@
 #include <sys/mman.h>
 #endif
 
+#define DEBUG 1
+
 typedef struct ShmInfo {
     int id;
     char filename[40];
@@ -66,6 +68,9 @@ static void * get_shared_memory(uint32_t gfn)
         ShmInfo* shminfo = (ShmInfo *) malloc(sizeof(ShmInfo));
         sprintf(shminfo->filename, "virtio-memlink_%x", rand());
         shminfo->id = shm_open(shminfo->filename, O_CREAT | O_RDWR, S_IRUSR | S_IWUSR);
+#if DEBUG
+        printf("shm add: %s\n", shminfo->filename);
+#endif
 
         if (shminfo->id < 0){
             free(shminfo);
@@ -139,6 +144,9 @@ static void put_shared_memory(uint32_t gfn)
     shminfo->usedcount -= 1;
 
     if (unlikely(shminfo->usedcount == 0)){
+#if DEBUG
+        printf("shm remove: %s\n", shminfo->filename);
+#endif
         shm_unlink(shminfo->filename);
         if (memlink_map.shm_next.shm == shminfo){
             memlink_map.shm_next.shm = NULL;
@@ -151,19 +159,36 @@ void memlink_link_address(Memlink *ml)
 {
     unsigned long mem_size = ml->num_gfns << TARGET_PAGE_BITS;
     int i;
+    void *prev_addr = gfn_to_hva(ml->gfns[0], NULL), *cur_addr;
+    ml->continuous = 0;
 
-    if (ml->num_gfns == 1) {
+    for (i=1; i<ml->num_gfns; i++) {
+        cur_addr = gfn_to_hva(ml->gfns[i], NULL);
+        if (cur_addr != (prev_addr + TARGET_PAGE_SIZE)) {
+            break;
+        }
+    }
+
+    if (i == ml->num_gfns) {
         ml->host_memory = gfn_to_hva(ml->gfns[0], NULL);
+        ml->continuous = 1;
         goto finalize;
     }
 
     ml->host_memory = mmap(NULL, mem_size, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
 
+#if DEBUG
+    printf("link gfns: ");
+#endif
     for (i=0; i<ml->num_gfns; i++) {
+#if DEBUG
+        printf("%x ", ml->gfns[i]);
+#endif
         void * shmem = get_shared_memory(ml->gfns[i]);
         uint32_t offset = i << TARGET_PAGE_BITS;
         mremap(shmem, 0, TARGET_PAGE_SIZE, MREMAP_MAYMOVE | MREMAP_FIXED, ml->host_memory + offset);
     }
+    printf("\n");
 
 finalize:
     ml->offseted_host_memory = ml->host_memory + ml->offset;
@@ -173,8 +198,14 @@ void memlink_unlink_address(Memlink *ml)
 {
     int i;
 
-    if (ml->num_gfns > 1){
+    if (ml->continuous == 0){
+#if DEBUG
+        printf("unlink gfns: ");
+#endif
         for (i=0; i<ml->num_gfns; i++) {
+#if DEBUG
+            printf("%x ", ml->gfns[i]);
+#endif
             put_shared_memory(ml->gfns[i]);
         }
     }

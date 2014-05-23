@@ -852,7 +852,7 @@ static void virtio_balloon_exit_pci(PCIDevice *pci_dev)
     virtio_exit_pci(pci_dev);
 }
 
-static int virtio_memlink_init_pci(PCIDevice *pci_dev)
+static int virtio_rng_init_pci(PCIDevice *pci_dev)
 {
     VirtIOPCIProxy *proxy = DO_UPCAST(VirtIOPCIProxy, pci_dev, pci_dev);
     VirtIODevice *vdev;

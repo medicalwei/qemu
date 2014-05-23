@@ -9,6 +9,7 @@ typedef struct Memlink {
     unsigned int num_gfns;
     uint32_t *gfns;
     unsigned int offset;
+    int continuous;
 } Memlink;
 
 void memlink_link_address(Memlink *ml);
