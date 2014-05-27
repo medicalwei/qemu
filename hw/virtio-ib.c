@@ -490,15 +490,17 @@ static unsigned int virtib_device_mmap(VirtQueueElement *elem){
      * out_sg[2] uint32_t: offset
      * out_sg[3] uint64_t: address
      * out_sg[4] uint64_t: size
+     * out_sg[5]  int32_t: flags
      */
     int32_t     fd     = (int32_t)    ldl_p(elem->out_sg[1].iov_base);
     off_t       offset = (off_t)      ldl_p(elem->out_sg[2].iov_base);
     ram_addr_t  pa     = (ram_addr_t) ldq_p(elem->out_sg[3].iov_base);
     uint64_t    size   = (uint64_t)   ldq_p(elem->out_sg[4].iov_base);
+    int32_t     flags  = (int32_t)    ldl_p(elem->out_sg[5].iov_base);
     void       *addr   = gpa_to_hva(pa);
 
     munmap(addr, size);
-    mmap(addr, size, PROT_WRITE, MAP_SHARED | MAP_FIXED, fd, offset);
+    mmap(addr, size, flags, MAP_SHARED | MAP_FIXED, fd, offset);
 
     return 0;
 }
@@ -515,7 +517,7 @@ static unsigned int virtib_device_munmap(VirtQueueElement *elem){
 
     munmap(addr, size);
     mmap(addr, size, PROT_READ | PROT_WRITE | PROT_EXEC,
-	    MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
+    	MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
 
     return 0;
 }

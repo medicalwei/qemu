@@ -103,6 +103,8 @@ static void * get_shared_memory(uint32_t gfn)
     mmap(qemu_hva, TARGET_PAGE_SIZE, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_FIXED, item->shm->id,
          item->offset);
 
+    madvise(qemu_hva, TARGET_PAGE_SIZE, MADV_DONTFORK);
+
     memcpy(qemu_hva, item->shm->orig_mem+item->offset, TARGET_PAGE_SIZE);
 
     memlink_map.shm_next.offset += TARGET_PAGE_SIZE;
@@ -130,7 +132,10 @@ static void put_shared_memory(uint32_t gfn)
         return;
     }
 
+
     memcpy(item->shm->orig_mem+item->offset, qemu_hva, TARGET_PAGE_SIZE);
+
+    madvise(qemu_hva, TARGET_PAGE_SIZE, MADV_DOFORK);
 
     mremap(item->shm->orig_mem + item->offset, TARGET_PAGE_SIZE, TARGET_PAGE_SIZE,
            MREMAP_MAYMOVE | MREMAP_FIXED, qemu_hva);
@@ -159,12 +164,10 @@ void memlink_link_address(Memlink *ml)
 {
     unsigned long mem_size = ml->num_gfns << TARGET_PAGE_BITS;
     int i;
-    void *prev_addr = gfn_to_hva(ml->gfns[0], NULL), *cur_addr;
     ml->continuous = 0;
 
     for (i=1; i<ml->num_gfns; i++) {
-        cur_addr = gfn_to_hva(ml->gfns[i], NULL);
-        if (cur_addr != (prev_addr + TARGET_PAGE_SIZE)) {
+        if (ml->gfns[i] != (ml->gfns[i-1] + 1)) {
             break;
         }
     }
@@ -172,6 +175,13 @@ void memlink_link_address(Memlink *ml)
     if (i == ml->num_gfns) {
         ml->host_memory = gfn_to_hva(ml->gfns[0], NULL);
         ml->continuous = 1;
+        munmap(ml->host_memory, mem_size);
+        mmap(ml->host_memory, mem_size, PROT_READ | PROT_WRITE,
+                MAP_SHARED | MAP_FIXED | MAP_ANONYMOUS, -1, 0);
+        madvise(ml->host_memory, mem_size, MADV_DONTFORK);
+#if DEBUG
+        printf("continuous gfn: %x->%p, %d gfns\n", ml->gfns[0], ml->host_memory, ml->num_gfns);
+#endif
         goto finalize;
     }
 
@@ -181,14 +191,16 @@ void memlink_link_address(Memlink *ml)
     printf("link gfns: ");
 #endif
     for (i=0; i<ml->num_gfns; i++) {
-#if DEBUG
-        printf("%x ", ml->gfns[i]);
-#endif
         void * shmem = get_shared_memory(ml->gfns[i]);
+#if DEBUG
+        printf("%x->%p ", ml->gfns[i], shmem);
+#endif
         uint32_t offset = i << TARGET_PAGE_BITS;
         mremap(shmem, 0, TARGET_PAGE_SIZE, MREMAP_MAYMOVE | MREMAP_FIXED, ml->host_memory + offset);
     }
+#if DEBUG
     printf("\n");
+#endif
 
 finalize:
     ml->offseted_host_memory = ml->host_memory + ml->offset;
@@ -196,6 +208,7 @@ finalize:
 
 void memlink_unlink_address(Memlink *ml)
 {
+    unsigned long mem_size = ml->num_gfns << TARGET_PAGE_BITS;
     int i;
 
     if (ml->continuous == 0){
@@ -208,6 +221,14 @@ void memlink_unlink_address(Memlink *ml)
 #endif
             put_shared_memory(ml->gfns[i]);
         }
+#if DEBUG
+        printf("\n");
+#endif
+    } else {
+        madvise(ml->host_memory, mem_size, MADV_DOFORK);
+        munmap(ml->host_memory, mem_size);
+        mmap(ml->host_memory, mem_size, PROT_READ | PROT_WRITE | PROT_EXEC,
+        	MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
     }
 }
 

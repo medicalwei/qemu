@@ -1,8 +1,6 @@
 #ifndef _QEMU_MEMLINK_H
 #define _QEMU_MEMLINK_H
-
-#define MEMLINK_SHMMAX 268435456
-
+#define MEMLINK_SHMMAX 1024*1024*64
 typedef struct Memlink {
     void *host_memory;
     void *offseted_host_memory;
