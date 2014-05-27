@@ -8,7 +8,7 @@
 #include <sys/mman.h>
 #endif
 
-#define DEBUG 1
+#define DEBUG 0
 
 typedef struct ShmInfo {
     int id;
