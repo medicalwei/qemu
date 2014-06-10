@@ -44,7 +44,7 @@ static void virtio_memlink_handle_create(VirtIODevice *vdev, VirtQueue *vq)
         ml->ml.num_gfns = elem.out_sg[2].iov_len / sizeof(uint32_t);
         ml->ml.gfns = (uint32_t *) malloc(elem.out_sg[2].iov_len);
 
-        iov_to_buf(&elem.out_sg[2], 1, 0, &ml->ml.gfns, elem.out_sg[2].iov_len);
+        iov_to_buf(&elem.out_sg[2], 1, 0, ml->ml.gfns, elem.out_sg[2].iov_len);
 
         memlink_link_address(&ml->ml);
 
