@@ -172,12 +172,15 @@ void memlink_link_address(Memlink *ml)
         }
     }
 
-    if (i == ml->num_gfns) {
+    /* make sure that there's no pre-existing mmap */
+    if (i == ml->num_gfns && memlink_map.map[ml->gfns[0]].shm != NULL){
+        void * new_mapping;
         ml->host_memory = gfn_to_hva(ml->gfns[0], NULL);
         ml->continuous = 1;
+        new_mapping = mmap(NULL, mem_size, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+        memcpy(new_mapping, ml->host_memory, mem_size);
         munmap(ml->host_memory, mem_size);
-        mmap(ml->host_memory, mem_size, PROT_READ | PROT_WRITE,
-                MAP_SHARED | MAP_FIXED | MAP_ANONYMOUS, -1, 0);
+        mremap(new_mapping, mem_size, mem_size, MREMAP_MAYMOVE | MREMAP_FIXED, ml->host_memory);
         madvise(ml->host_memory, mem_size, MADV_DONTFORK);
 #if DEBUG
         printf("continuous gfn: %x->%p, %d gfns\n", ml->gfns[0], ml->host_memory, ml->num_gfns);
@@ -225,10 +228,13 @@ void memlink_unlink_address(Memlink *ml)
         printf("\n");
 #endif
     } else {
-        madvise(ml->host_memory, mem_size, MADV_DOFORK);
+        void *new_mapping;
+
+        new_mapping = mmap(0, mem_size, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        memcpy(new_mapping, ml->host_memory, mem_size);
         munmap(ml->host_memory, mem_size);
-        mmap(ml->host_memory, mem_size, PROT_READ | PROT_WRITE | PROT_EXEC,
-        	MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
+        mremap(new_mapping, mem_size, mem_size, MREMAP_MAYMOVE | MREMAP_FIXED, ml->host_memory);
+        madvise(ml->host_memory, mem_size, MADV_DOFORK);
     }
 }
 
